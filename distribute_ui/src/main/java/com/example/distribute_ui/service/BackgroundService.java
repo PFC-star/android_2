@@ -164,6 +164,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 Log.d(TAG, "serverStatus :working ");
 //              初始化阶段
 
+
             }
 
             if (serverStatus.equals("active")){
