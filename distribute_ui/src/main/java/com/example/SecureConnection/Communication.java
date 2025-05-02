@@ -153,11 +153,96 @@ public class Communication {
         rootSocket.send(jsonObject.toString());
         Log.d(TAG, "IP message sent");
         String msg_ = new String(rootSocket.recv(0));
-        Log.d(TAG, "msg: " + msg_);
+        Log.d(TAG, " msg: " + msg_);
+
+        // 启动心跳检测线程
+        startHeartbeatDetection();
 
         return msg_;
     }
 
+    private volatile boolean isHeartbeatRunning = true;
+    private Thread heartbeatThread = null;
+    
+    /**
+     * 启动心跳检测线程，定期向服务器发送心跳信息
+     */
+    public void startHeartbeatDetection() {
+        if (heartbeatThread != null && heartbeatThread.isAlive()) {
+            return; // 避免重复启动
+        }
+        
+        heartbeatThread = new Thread(() -> {
+            try {
+                // 使用相同的Socket连接，通过不同的Action进行区分
+                // 注册时使用的是"RegisterIP"，心跳检测使用"HEARTBEAT"
+                Log.d(TAG, "Heartbeat thread started, using existing socket connection");
+                
+                while (isHeartbeatRunning) {
+                    try {
+                        // 发送心跳消息
+                        rootSocket.sendMore("HEARTBEAT");
+                        rootSocket.send("");
+                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+                        
+                        // 接收心跳响应
+                        String response = new String(rootSocket.recv(0));
+                        Log.d(TAG, "Heartbeat response: " + response);
+                        
+                        // 检查是否收到额外的系统状态信息
+                        if (rootSocket.hasReceiveMore()) {
+                            String systemStatus = new String(rootSocket.recv(0));
+                            Log.d(TAG, "System status: " + systemStatus);
+                            
+                            // 如果系统出现故障，调用故障恢复函数
+                            if ("SYSTEM_FAILURE".equals(systemStatus)) {
+                                Log.w(TAG, "System failure detected, initiating recovery process");
+                                handleSystemFailure();
+                            }
+                        }
+                        
+                        // 心跳间隔，建议低于服务器超时阈值的一半
+                        Thread.sleep(10000); // 10秒发送一次心跳
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error in heartbeat loop: " + e.getMessage());
+                        // 心跳发送失败，短暂等待后重试
+                        Thread.sleep(5000);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Fatal error in heartbeat thread: " + e.getMessage());
+            }
+        });
+        
+        heartbeatThread.setDaemon(true); // 设为守护线程，不阻止JVM退出
+        heartbeatThread.start();
+        Log.d(TAG, "Heartbeat detection thread started");
+    }
+    
+    /**
+     * 停止心跳检测线程
+     */
+    public void stopHeartbeatDetection() {
+        isHeartbeatRunning = false;
+        if (heartbeatThread != null) {
+            heartbeatThread.interrupt();
+            heartbeatThread = null;
+        }
+        Log.d(TAG, "Heartbeat detection stopped");
+    }
+    
+    /**
+     * 处理系统故障
+     * 当检测到系统故障时，此方法将被调用
+     */
+    public void handleSystemFailure() {
+        // 故障处理逻辑
+        Log.w(TAG, "System failure handling initiated");
+        // TODO: 实现故障恢复流程，如重新注册、数据重传等
+        // 这里暂时只输出日志
+        param.status = "Failure";
+        Log.w(TAG, "System has encountered a failure, current status changed to: " + param.status);
+    }
 
     // 运行负责函数Prepare的线程
     public void runPrepareThread(){
@@ -472,6 +557,7 @@ public class Communication {
             this.sample_id = sample_id;
             ArrayList<Map<Integer, Socket>> sockets = null;
             try {
+//                控制上下通信
                 sockets = allSockets.take();    // 从队列中取出一个ArrayList<Map<Integer, Socket>>，包含客户端和服务器的socket配置
             } catch (InterruptedException e) {
                 System.out.println("Waiting for an element from the sockets queue...");

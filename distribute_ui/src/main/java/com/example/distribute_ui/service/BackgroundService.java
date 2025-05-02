@@ -55,7 +55,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     }
 
     // 订阅事件enterChatEvent，收到事件后启动后台线程处理
-    // 获取是否应开始推理
+    // 获取是否应开始推理  推理开始标志
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onEnterChatEvent(Events.enterChatEvent event) {
         shouldStartInference = event.enterChat;
@@ -163,6 +163,9 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             if (serverStatus.equals("working")){
                 Log.d(TAG, "serverStatus :working ");
 //              初始化阶段
+//                1. 传输控制信号 34567
+//                    1.1 Ready->Open->Prepare->Initialized->Start->Running
+//
 
 
             }
@@ -170,6 +173,22 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             if (serverStatus.equals("active")){
                 Log.d(TAG, "serverStatus :active ");
 //              运行阶段
+//                1. 传输控制信号 34567
+//                    1.1 Ready->Open->Prepare->Initialized 到这里但是不启动推理
+//                    ->Start->Running
+//                  什么时候启动推理呢？server检测到设备故障
+//                    server 进入故障恢复函数 （把这个搞定吧）
+//                    手机1 进入故障恢复函数
+//                找到通信IP图（config["graph"],
+//                            config["session_index"],）
+//                            receiveIPGraph(cfg, receiver); -> Config.buildCommunicationGraph()
+//                            receiveSessionIndex(receiver);
+//                      以及注册IP图的地方，Communication.updateSockets
+//
+//                  重新通信IP图，启动手机3
+//                  重新注册IP图，启动手机1
+//                  恢复推理：手机1 根据IP图重新通信到手机3
+
 
 
             }
