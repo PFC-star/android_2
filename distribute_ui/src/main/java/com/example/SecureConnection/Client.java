@@ -19,6 +19,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;
+import org.zeromq.ZMQ;
 import org.zeromq.ZMQ.Socket;
 
 import java.io.IOException;
@@ -104,8 +105,11 @@ public class Client {
                         Log.d(TAG, "Post Events.RunningStatusEvent(true)");
                     }
                 }
+            }
 
-            } else if (param.status.equals("Finish")) {
+
+
+            else if (param.status.equals("Finish")) {
                 receiver.send("Finish");
                 String msg = new String(receiver.recv(0));
                 System.out.println(msg);
@@ -120,6 +124,207 @@ public class Client {
                 System.out.println("Finish task");
                 Log.d(TAG, "Finish task");
                 break;
+            }
+            else if (param.status.equals("Recovery")){
+
+                // 添加对运行状态的处理，实时监听是否有故障恢复消息
+
+
+                receiver.sendMore("Recovery");         // sendMore表示后续还有消息待发送
+
+                receiver.send(Config.local, 0);
+
+//                  握手成功
+                Log.d(TAG, "开始接收故障恢复信息");
+                receiveIPGraph(cfg, receiver);
+
+                receiveSessionIndex(receiver);
+                        // 进行故障恢复处理
+                param.status = "Recovering";
+
+
+            }
+            else if (param.status.equals("Recovering")){
+                Log.d(TAG, "开始执行故障恢复过程");
+
+
+////                 清理现有Socket连接
+//                com.cleanExistingConnections();
+//
+//                // 使用LoadBalance的方法更新设备映射和会话
+//                Communication.loadBalance.ModifySession();
+//                Communication.loadBalance.reLoadBalance();
+//
+//                // 重新创建Socket连接
+//                com.updateSockets(param.corePoolSize);
+//
+//                // 重置重载标志
+//                Communication.loadBalance.setReSampleId(-1);
+//                Communication.LB_Pause.setConditionFalse();
+//
+//                // 恢复推理过程
+//                com.resumeInference();
+
+//                 恢复状态
+                param.status = "Running";
+                receiver.sendMore("RecoveryInference");         // sendMore表示后续还有消息待发送
+
+                receiver.send(Config.local, 0);
+
+
+
+            }
+        }
+    }
+    public void communicationOpenCloseActive(Config cfg, Communication com, Socket receiver, String modelName, String serverIp, int role) throws Exception {
+        Log.d(TAG, "Start communicationOpenCloseActive");
+        Communication.Params param = com.param;
+        while (true) {
+            // status为Ready时，向服务器发送"Ready"和自身ip，等待服务器发送msg
+            if (param.status.equals("Ready")) {
+                Log.d(TAG, "Status: Ready");
+                receiver.sendMore("Ready");         // sendMore表示后续还有消息待发送
+
+                receiver.send(Config.local, 0);     // send表示为完整消息
+                Log.d(TAG, "waiting for open signal");
+
+                // Open
+                String msg = new String(receiver.recv(0));
+                Log.d(TAG, "msg: " + msg);
+                if (msg.equals("Open")) {   // 收到msg为"Open"时，修改status，进行一系列准备工作
+                    param.status = "Open";
+                    System.out.println("Status: Open");
+
+                    receiveIPGraph(cfg, receiver);
+
+                    receiveSessionIndex(receiver);
+
+                    receiveTaskType(param,receiver);
+
+                    receiveThreadPoolSize(param, receiver);
+
+                    receiveBatchSize(param, receiver);
+
+                    receiveSeqLength(param,receiver);
+
+                    receiveDependencyMap(receiver);
+
+                    String num_devices = new String(receiver.recv(0));
+                    Log.d(TAG, "num_devices: " + num_devices);
+
+
+                    Log.d(TAG, "open status receive info finished");
+                }
+
+                // Prepare
+                msg = new String(receiver.recv(0));
+                Log.d(TAG, "prepare msg: " + msg);
+                if (msg.equals("Prepare")) {    // 收到msg为"Prepare"时，修改status，准备好模型文件
+//                    先不准备模型
+//                    communicationPrepare(receiver, param, modelName, serverIp, role);  // 准备好解压后的模型文件
+                }
+
+                // 初始化负载均衡和模型（新建会话和分词器）
+//                LoadBalanceInitialization();
+//                modelInitialization(cfg, param); //暂时先不加载权重
+                param.status = "Initialized";
+                System.out.println("Status: Initialized");
+                receiver.send("Initialized", 0);
+
+                msg = new String(receiver.recv(0));
+                System.out.println(msg);
+
+                if (msg.equals("Start")) {
+                    param.status = "Start";
+                    Log.d(TAG, "Status: Start");
+                    receiver.send("Running");
+                    Log.d(TAG, "Status: Running");
+                    param.status = "Running";
+                    if (param.status == "Running") {
+                        // 发送RunningStatusEvent事件使BackgroundService中的runningStatus为true
+
+                        EventBus.getDefault().post(new Events.RunningStatusEvent(true));
+                        Log.d(TAG, "Post Events.RunningStatusEvent(true)");
+                    }
+                }
+                if (msg.equals("WaitingStart")) {
+                    param.status = "WaitingStart";
+                    Log.d(TAG, "Status: WaitingStart");
+
+
+                    if (param.status == "WaitingStart") {
+
+                    }
+                }
+
+            }
+
+
+
+            else if (param.status.equals("Finish")) {
+                receiver.send("Finish");
+                String msg = new String(receiver.recv(0));
+                System.out.println(msg);
+                System.out.println("Status: Close");
+                Log.d(TAG, "Status: Close");
+
+                if (msg.equals("Close")) {  // 收到msg为"Close"时，关闭所有的套接字
+                    for(ArrayList<Map<Integer, Socket>> s: com.allSockets)
+                        closeSockets(s);
+//                    com.context.close();
+                }
+                System.out.println("Finish task");
+                Log.d(TAG, "Finish task");
+                break;
+            }
+            else if (param.status.equals("Recovery")){
+
+                // 添加对运行状态的处理，实时监听是否有故障恢复消息
+
+
+                receiver.sendMore("Recovery");         // sendMore表示后续还有消息待发送
+
+                receiver.send(Config.local, 0);
+
+//                  握手成功
+                Log.d(TAG, "开始接收故障恢复信息");
+                receiveIPGraph(cfg, receiver);
+
+                receiveSessionIndex(receiver);
+                // 进行故障恢复处理
+                param.status = "Recovering";
+
+
+            }
+            else if (param.status.equals("Recovering")){
+                Log.d(TAG, "开始执行故障恢复过程");
+
+
+////                 清理现有Socket连接
+//                com.cleanExistingConnections();
+//
+//                // 使用LoadBalance的方法更新设备映射和会话
+//                Communication.loadBalance.ModifySession();
+//                Communication.loadBalance.reLoadBalance();
+//
+//                // 重新创建Socket连接
+//                com.updateSockets(param.corePoolSize);
+//
+//                // 重置重载标志
+//                Communication.loadBalance.setReSampleId(-1);
+//                Communication.LB_Pause.setConditionFalse();
+//
+//                // 恢复推理过程
+//                com.resumeInference();
+
+//                 恢复状态
+                param.status = "Running";
+                receiver.sendMore("RecoveryInference");         // sendMore表示后续还有消息待发送
+
+                receiver.send(Config.local, 0);
+
+
+
             }
         }
     }
@@ -224,7 +429,7 @@ public class Client {
     }
 
     // 构建通信图，获取设备Id
-    private void receiveIPGraph(Config cfg, Socket receiver){
+    void receiveIPGraph(Config cfg, Socket receiver){
         byte[] ip_graph = receiver.recv(0);     // 接收IP图
         String ip_graph_str = new String(ip_graph);
         cfg.buildCommunicationGraph(ip_graph_str);   // 根据IP图构建通信图，为每个节点添加其头尾节点列表
@@ -233,7 +438,7 @@ public class Client {
     }
 
     // 接收片索引
-    private void receiveSessionIndex(Socket receiver){
+    void receiveSessionIndex(Socket receiver){
         // Receive Session Index and inital load balance
         String session_indices = receiver.recvStr(0);
         Communication.loadBalance.sessIndices = session_indices.split(";");

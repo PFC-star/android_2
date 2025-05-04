@@ -166,12 +166,17 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 //                1. 传输控制信号 34567
 //                    1.1 Ready->Open->Prepare->Initialized->Start->Running
 //
-
+                // 3.1 start downloading required model and tokenizer files from server
+                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
+                com.runPrepareThread(serverStatus);
 
             }
 
             if (serverStatus.equals("active")){
                 Log.d(TAG, "serverStatus :active ");
+                // 3.1 start downloading required model and tokenizer files from server
+                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
+                com.runPrepareThread(serverStatus);
 //              运行阶段
 //                1. 传输控制信号 34567
 //                    1.1 Ready->Open->Prepare->Initialized 到这里但是不启动推理
@@ -195,9 +200,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
 
 
-            // 3.1 start downloading required model and tokenizer files from server
-            // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
-            com.runPrepareThread();
+
 
             // 3.2 Check whether the model file exists
             // 当param.status == "Running"时会收到事件RunningStatusEvent->runningStatus=true

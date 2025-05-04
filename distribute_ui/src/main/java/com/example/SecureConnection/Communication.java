@@ -153,7 +153,7 @@ public class Communication {
         rootSocket.send(jsonObject.toString());
         Log.d(TAG, "IP message sent");
         String msg_ = new String(rootSocket.recv(0));
-        Log.d(TAG, " msg: " + msg_);
+        Log.d(TAG, "msg: " + msg_);
 
         // 启动心跳检测线程
         startHeartbeatDetection();
@@ -183,21 +183,33 @@ public class Communication {
                         // 发送心跳消息
                         rootSocket.sendMore("HEARTBEAT");
                         rootSocket.send("");
-                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+//                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
                         
                         // 接收心跳响应
                         String response = new String(rootSocket.recv(0));
-                        Log.d(TAG, "Heartbeat response: " + response);
                         
                         // 检查是否收到额外的系统状态信息
                         if (rootSocket.hasReceiveMore()) {
                             String systemStatus = new String(rootSocket.recv(0));
                             Log.d(TAG, "System status: " + systemStatus);
-                            
-                            // 如果系统出现故障，调用故障恢复函数
-                            if ("SYSTEM_FAILURE".equals(systemStatus)) {
-                                Log.w(TAG, "System failure detected, initiating recovery process");
-                                handleSystemFailure();
+                            Log.d(TAG, "param status: " +  param.status);
+                            // 如果系统出现故障，发送故障信号到通信套接字
+                            if ("SYSTEM_FAILURE".equals(systemStatus) )
+                            {
+                                Log.w(TAG, "System failure detected in heartbeat thread");
+                                // 不再启动新线程处理故障恢复，因为现在由communicationOpenClose中的循环处理
+                                // 相反，我们发送故障信号到通信套接字
+                                try {
+                                    // 注意：我们不再直接调用handleSystemFailure，而是依赖communicationOpenClose处理
+                                    // 只需在日志中记录，让通信线程发现故障状态
+                                    Log.w(TAG, "系统故障已检测到，通信线程将处理恢复");
+//                                  需要进入到故障恢复流程
+                                    param.status = "Recovery";
+//                                    后面是不是还会再次进入？
+//                                    什么时候恢复？
+                                } catch (Exception e) {
+                                    Log.e(TAG, "无法处理故障恢复: " + e.getMessage());
+                                }
                             }
                         }
                         
@@ -206,7 +218,11 @@ public class Communication {
                     } catch (Exception e) {
                         Log.e(TAG, "Error in heartbeat loop: " + e.getMessage());
                         // 心跳发送失败，短暂等待后重试
-                        Thread.sleep(5000);
+                        try {
+                            Thread.sleep(5000);
+                        } catch (InterruptedException ie) {
+                            // 忽略中断异常
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -234,22 +250,158 @@ public class Communication {
     /**
      * 处理系统故障
      * 当检测到系统故障时，此方法将被调用
+     * 注意：此方法现在主要由communicationOpenClose方法调用，不再直接处理通信
      */
     public void handleSystemFailure() {
-        // 故障处理逻辑
+        // 如果已经在故障处理或恢复中，避免重复处理
+        Log.d(TAG, "Entering system failure handling procedure");
+        if ("Failure".equals(param.status) || "Recovering".equals(param.status)) {
+            Log.d(TAG, "System already in failure/recovery state, ignoring duplicate recovery trigger");
+            return;
+        }
+        
         Log.w(TAG, "System failure handling initiated");
-        // TODO: 实现故障恢复流程，如重新注册、数据重传等
-        // 这里暂时只输出日志
-        param.status = "Failure";
-        Log.w(TAG, "System has encountered a failure, current status changed to: " + param.status);
+        param.status = "Recovering"; // 更改为恢复中状态，区别于完全故障
+        Log.d(TAG, "param status: " +  param.status);
+        
+        try {
+            // 注意：此方法不再直接处理通信逻辑，所有的通信现在应该在Client.communicationOpenClose中处理
+            // 它只包含恢复逻辑，以便在接收到所需数据后执行
+            
+            // 设置LoadBalance的reSampleId触发重载平衡
+            Communication.loadBalance.setReSampleId(sampleId);
+            
+            // 清理现有Socket连接
+            cleanExistingConnections();
+            
+            // 使用LoadBalance的方法更新设备映射和会话
+            loadBalance.ModifySession();
+            loadBalance.reLoadBalance();
+            
+            // 重新创建Socket连接
+            updateSockets(param.corePoolSize);
+            Log.d(TAG, "Device connections re-established");
+            
+            // 重置重载标志
+            Communication.loadBalance.setReSampleId(-1);
+            Communication.LB_Pause.setConditionFalse();
+            
+            // 恢复状态
+            param.status = "Running";
+            Log.d(TAG, "System recovery completed, status restored to: " + param.status);
+            
+            // 重新启动推理过程
+            resumeInference();
+        } catch (Exception e) {
+            Log.e(TAG, "Error during system failure recovery: " + e.getMessage());
+            e.printStackTrace();
+            // 恢复过程出错，设置为故障状态
+            param.status = "Failure";
+        }
+    }
+    
+    /**
+     * 清理现有的Socket连接
+     */
+    void cleanExistingConnections() {
+        try {
+            // 清理现有连接
+            while (!allSockets.isEmpty()) {
+                ArrayList<Map<Integer, Socket>> socketPair = allSockets.take();
+                for (Map<Integer, Socket> socketMap : socketPair) {
+                    for (Socket socket : socketMap.values()) {
+                        socket.close();
+                    }
+                }
+            }
+            Log.d(TAG, "Existing connections cleaned up");
+        } catch (Exception e) {
+            Log.e(TAG, "Error cleaning existing connections: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 恢复推理过程
+     */
+    void resumeInference() {
+        try {
+            Log.d(TAG, "恢复推理过程");
+            
+            // 检查当前的状态和进度
+            if (sampleId < param.numSample) {
+                // 还有未完成的样本，重新开始从当前样本推理
+                Log.d(TAG, "Resuming inference from sample " + sampleId);
+                
+                // 清理可能的中间状态，但保留输入数据
+                Map<Integer, ArrayList<Integer>> savedInputIds = null;
+                if (cfg.isHeader()) {
+                    // 头节点需要保存输入数据以便恢复
+                    savedInputIds = new HashMap<>(InputIds);
+                }
+                
+                OutputData.clear();
+                ResidualDataFromDevice.clear();
+                ResidualDataToDevice.clear();
+                
+                if (cfg.isHeader()) {
+                    // 恢复头节点的输入数据
+                    if (savedInputIds != null) {
+                        // 仅保留已完成处理的样本的数据
+                        for (int i = 0; i < sampleId; i++) {
+                            if (savedInputIds.containsKey(i)) {
+                                InputIds.put(i, savedInputIds.get(i));
+                                Log.d(TAG, "Restored input data for sample " + i);
+                            }
+                        }
+                    }
+                    
+                    // 如果当前正在处理的样本有部分输入数据，也需要恢复
+                    if (savedInputIds != null && savedInputIds.containsKey(sampleId-1)) {
+                        InputIds.put(sampleId-1, savedInputIds.get(sampleId-1));
+                        Log.d(TAG, "Restored in-progress sample data for sample " + (sampleId-1));
+                        
+                        // 记录恢复的数据大小，用于调试
+                        Log.d(TAG, "Restored data size: " + InputIds.get(sampleId-1).size() + " tokens");
+                        
+                        // 检查是否有足够的输入标记以继续处理
+                        if (InputIds.get(sampleId-1).size() > 0) {
+                            // 获取最后生成的token，可用于显示
+                            int lastToken = InputIds.get(sampleId-1).get(InputIds.get(sampleId-1).size() - 1);
+                            String lastTokenText = decodeID(new int[]{lastToken}, tokenizer);
+                            Log.d(TAG, "Last generated token before failure: " + lastTokenText);
+                            
+                            // 更新UI显示，通知用户恢复了之前的生成
+                            ArrayList<Integer> decodeList = InputIds.get(sampleId-1);
+                            String decodedString = decodeID(Utils.convertArrayListToIntArray(
+                                    Objects.requireNonNull(decodeList)), tokenizer);
+                            System.out.println("Recovered generated text: " + decodedString);
+                            DataRepository.INSTANCE.updateDecodingString(decodedString);
+                        }
+                    }
+                    
+                    Log.d(TAG, "Header node input data resynchronized");
+                }
+                
+                // 通知服务器准备好继续推理
+                rootSocket.sendMore("RESUME_INFERENCE");
+                rootSocket.send(String.valueOf(sampleId));
+                
+                Log.d(TAG, "Inference process resumed");
+            } else {
+                Log.d(TAG, "No more samples to process, inference already completed");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error resuming inference: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     // 运行负责函数Prepare的线程
-    public void runPrepareThread(){
+    public void runPrepareThread(String param){
         executor = Executors.newFixedThreadPool(2); // 创建一个最多2个线程同时执行的线程池
         executor.submit(()-> {  // 提交任务到线程池
             try {
-                this.prepare(); // 运行Communication类的prepare方法
+                this.prepare(param); // 运行Communication类的prepare方法
             } catch (Exception e) { // 如果 prepare() 方法抛出异常，抛出一个运行时异常
                 throw new RuntimeException(e);
             }
@@ -270,12 +422,22 @@ public class Communication {
         executor.shutdown();
     }
 
-    public void prepare() throws Exception {
+    public void prepare(String param) throws Exception {
         long startTime = System.nanoTime(); // 记录开始时间
         // Communicate with Root Root Server
         Log.d(TAG, "root IP: " + cfg.root +  " ,root port: " + cfg.rootPort);
-        commuSocket  = beClient.establish_connection(context, SocketType.DEALER, 34567,cfg.root); // 与服务器建立连接
-        beClient.communicationOpenClose(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role); // 执行Client类的communicationOpenClose方法
+
+        if (param.equals("active")){
+            commuSocket  = beClient.establish_connection(context, SocketType.DEALER, 23457,cfg.root); // 与服务器建立连接
+
+            beClient.communicationOpenCloseActive(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
+        }
+        else if (param.equals("working")){
+            commuSocket  = beClient.establish_connection(context, SocketType.DEALER, 34567,cfg.root); // 与服务器建立连接
+            beClient.communicationOpenClose(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
+        }
+        // 执行Client类的communicationOpenClose方法
+
         long prepareTime = System.nanoTime();   // 记录完成时间
         System.out.println("Prepare Time in seconds: " + (prepareTime - startTime) / 1000000000.0);
         timeUsage[0] = (prepareTime - startTime) / 1000000000.0;    // 记录准备时间（单位/s）
