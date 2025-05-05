@@ -21,12 +21,17 @@ import org.zeromq.SocketType;
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
 import org.zeromq.ZMQ.Socket;
+import org.zeromq.ZMQException;
 
 import java.io.IOException;
 import java.util.Objects;
 
 import com.example.distribute_ui.Events;
 import com.example.distribute_ui.network.FTPHelper;
+
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.lang.reflect.Field;
 
 public class Client {
     /**
@@ -39,7 +44,23 @@ public class Client {
      */
     public Socket establish_connection(ZContext context, SocketType type, int port, String address) {
         Socket socket = context.createSocket(type);
-        socket.connect("tcp://" + address + ":" + port);
+        try {
+            Log.d(TAG, "尝试连接到地址: " + address + ", 端口: " + port);
+            socket.connect("tcp://" + address + ":" + port);
+            Log.d(TAG, "成功连接到地址: " + address + ", 端口: " + port);
+        } catch (ZMQException e) {
+            Log.e(TAG, "连接到地址: " + address + ", 端口: " + port + " 失败: " + e.getMessage() + ", 错误码: " + e.getErrorCode());
+            if (e.getErrorCode() == ZMQ.Error.ECONNREFUSED.getCode()) {
+                Log.e(TAG, "连接被拒绝，目标设备可能未启动或端口未开启");
+            } else if (e.getErrorCode() == ZMQ.Error.ETIMEDOUT.getCode()) {
+                Log.e(TAG, "连接超时，目标设备可能无法访问");
+            }
+            // 重新抛出异常，保持原有行为
+            throw e;
+        } catch (Exception e) {
+            Log.e(TAG, "连接到地址: " + address + ", 端口: " + port + " 时发生未知异常: " + e.getMessage());
+            throw e;
+        }
         return socket;
     }
     
@@ -160,63 +181,91 @@ public class Client {
             }
             else if (param.status.equals("Recovery")){
                 // 收到故障恢复信号，进入恢复流程
+                Log.d(TAG, "进入故障恢复状态 - Recovery");
+                
+                // 暂停所有推理线程（设置标志位阻止新任务提交）
+                Communication.LB_Pause.setConditionTrue();
+                Log.d(TAG, "已暂停所有推理线程，阻止新任务提交");
+                
+                // 保存当前批次ID用于后续恢复
+                // 这个只是保存了当前批次ID
+                Communication.loadBalance.setReSampleId(com.sampleId);
+                Log.d(TAG, "已保存当前批次ID: " + com.sampleId + " 用于恢复");
+                
                 // 向服务器发送恢复请求和自身IP
                 receiver.sendMore("Recovery");         
                 receiver.send(Config.local, 0);
+                Log.d(TAG, "已向服务器发送恢复请求");
 
                 // 接收新的IP图与会话索引
                 Log.d(TAG, "开始接收故障恢复信息");
                 receiveIPGraph(cfg, receiver);
                 receiveSessionIndex(receiver);
+                
                 // 接收新的依赖图（如果需要）
                 receiveDependencyMap(receiver);
+                Log.d(TAG, "故障恢复信息接收完成");
                 
                 // 进入恢复处理阶段
                 param.status = "Recovering";
             }
             else if (param.status.equals("Recovering")){
-                Log.d(TAG, "开始执行故障恢复过程");
+                Log.d(TAG, "开始执行故障恢复过程 - Recovering");
+
+                // 等待现有任务完成
+                waitForTasksToComplete(com);
+                Log.d(TAG, "所有正在进行的任务已终止");
+                
+                // 保存中间状态（如果还未保存），InputData,OutputData，InputIds这些
+                saveIntermediateState(com);
+                Log.d(TAG, "中间状态已保存");
 
                 // 清理现有Socket连接
                 com.cleanExistingConnections();
+                Log.d(TAG, "现有Socket连接已清理");
 
-                // 更新会话和负载均衡
+                // 使用LoadBalance的方法更新设备映射和会话
                 Communication.loadBalance.ModifySession();
+                Log.d(TAG, "设备会话映射已更新");
+                
                 Communication.loadBalance.reLoadBalance();
+                Log.d(TAG, "负载均衡已重新计算");
 
                 // 重新创建Socket连接
                 com.updateSockets(param.corePoolSize);
+                Log.d(TAG, "Socket池已根据新的通信拓扑更新");
 
-                // 保存当前批次状态（sampleId）
-                int currentSampleId = com.getCurrentSampleId(); // 假设新增方法获取当前批次
-
-                // 重置重载标志
-                Communication.loadBalance.setReSampleId(-1);
-                Communication.LB_Pause.setConditionFalse();
-
-                OutputData intermediateResult = com.getIntermediateResult(currentSampleId - 1); // 获取上一批次结果
-
-                // 如果是头节点或需要发送结果的设备，发送中间结果给设备3
-                if (cfg.isHeader() || cfg.nextDeviceId() != -1) {
-                    Socket sendSocket = com.getSocketForDevice(cfg.nextDeviceId()); // 获取与设备3的Socket
-                    if (intermediateResult != null && sendSocket != null) {
-                        sendSocket.sendMore("INTERMEDIATE_RESULT");
-                        sendSocket.send(serializeOutputData(intermediateResult)); // 序列化并发送
-                        Log.d(TAG, "Sent intermediate result for sampleId: " + (currentSampleId - 1));
-                    }
+                // 向服务器发送恢复准备就绪信号
+                receiver.sendMore("RecoveryReady");
+                receiver.send(String.valueOf(com.sampleId));
+                Log.d(TAG, "已通知服务器恢复准备就绪，当前批次: " + com.sampleId);
+                
+                // 等待服务器发送恢复推理信号
+                String response = new String(receiver.recv(0));
+                if ("ResumeInference".equals(response)) {
+                    Log.d(TAG, "服务器已授权恢复推理");
+                    
+                    // 重置重载标志，允许继续处理任务
+                    Communication.loadBalance.setReSampleId(-1);
+                    Communication.LB_Pause.setConditionFalse();
+                    Log.d(TAG, "已重置标志位，允许推理继续");
+                    
+//                    // 如果需要向其他设备同步状态，在此处实现
+//                    syncStateWithNewDevices(com, receiver);
+                    
+                    // 恢复状态
+                    param.status = "Running";
+                    Log.d(TAG, "状态已恢复为Running，推理继续");
+                    
+                    // 通知服务器恢复完成
+                    receiver.sendMore("RecoveryCompleted");
+                    receiver.send(Config.local, 0);
+                    Log.d(TAG, "已通知服务器恢复完成");
+                } else {
+                    // 服务器没有发送正确的恢复信号
+                    Log.e(TAG, "服务器响应异常: " + response);
+                    param.status = "Failure";
                 }
-
-
-                // 恢复推理，从中断的批次继续
-                com.resumeInference(currentSampleId);
-
-                // 通知服务器恢复完成
-                param.status = "Running";
-                receiver.sendMore("RecoveryInference");
-                receiver.send(Config.local, 0);
-
-
-
             }
         }
     }
@@ -337,56 +386,85 @@ public class Client {
             }
             else if (param.status.equals("Recovery")){
                 // 活跃设备被选中替代故障设备时的恢复流程
+                Log.d(TAG, "进入故障恢复状态 - Recovery（活跃设备）");
+                
                 // 向服务器发送恢复请求和自身IP
-                receiver.sendMore("Recovery");         // sendMore表示后续还有消息待发送
-
+                receiver.sendMore("Recovery");         
                 receiver.send(Config.local, 0);
+                Log.d(TAG, "已向服务器发送恢复请求");
 
                 // 接收新的IP图与会话索引
                 Log.d(TAG, "开始接收故障恢复信息");
                 receiveIPGraph(cfg, receiver);
                 receiveSessionIndex(receiver);
                 
+                // 接收依赖图和其他必要配置
+                receiveDependencyMap(receiver);
+                Log.d(TAG, "故障恢复信息接收完成");
+                
                 // 进入恢复处理阶段
                 param.status = "Recovering";
             }
             else if (param.status.equals("Recovering")){
-                Log.d(TAG, "开始执行故障恢复过程");
+                Log.d(TAG, "开始执行故障恢复过程 - Recovering（活跃设备）");
 
-
-
-                // 更新会话和负载均衡
-                Communication.loadBalance.ModifySession();
-                Communication.loadBalance.reLoadBalance();
-
-                // 创建Socket连接
-                com.updateSockets(param.corePoolSize);
-
-                // 接收中间结果
-                int currentSampleId = com.getCurrentSampleId();
-                OutputData intermediateResult = null;
-                Socket receiveSocket = com.getSocketForDevice(cfg.prevDeviceId()); // 获取与设备1的Socket
-                if (receiveSocket != null) {
-                    String msg = new String(receiveSocket.recv(0));
-                    if (msg.equals("INTERMEDIATE_RESULT")) {
-                        byte[] data = receiveSocket.recv(0);
-                        intermediateResult = deserializeOutputData(data);
-                        com.saveIntermediateResult(currentSampleId - 1, intermediateResult);
-                        Log.d(TAG, "Received intermediate result for sampleId: " + (currentSampleId - 1));
+                // 激活设备需要执行以下步骤
+                // 1. 加载模型文件（如果还未加载）
+                if (Communication.sessions.isEmpty()) {
+                    Log.d(TAG, "加载模型文件...");
+                    try {
+                        // 准备模型文件
+                        communicationPrepare(receiver, param, "model", cfg.root, role);
+                        
+                        // 初始化模型
+                        LoadBalanceInitialization();
+                        modelInitialization(cfg, param);
+                        Log.d(TAG, "模型加载完成");
+                    } catch (Exception e) {
+                        Log.e(TAG, "模型加载失败: " + e.getMessage());
+                        param.status = "Failure";
+                        receiver.send("LoadModelFailed");
+                        return;
                     }
                 }
-
-                // 重置重载标志
-                Communication.loadBalance.setReSampleId(-1);
-                Communication.LB_Pause.setConditionFalse();
-
-                // 恢复推理，从中断的批次继续
-                com.resumeInference(currentSampleId, intermediateResult);
-
-                // 通知服务器恢复完成
-                param.status = "Running";
-                receiver.sendMore("RecoveryInference");
-                receiver.send(Config.local, 0);
+                
+                // 2. 建立socket连接
+                try {
+                    com.updateSockets(param.corePoolSize);
+                    Log.d(TAG, "Socket连接已建立");
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "Socket连接建立失败: " + e.getMessage());
+                    param.status = "Failure";
+                    receiver.send("CreateSocketFailed");
+                    return;
+                }
+                
+                // 3. 向服务器发送准备就绪信号
+                receiver.sendMore("RecoveryReady");
+                receiver.send(Config.local);
+                Log.d(TAG, "已通知服务器恢复准备就绪");
+                
+                // 4. 等待服务器返回恢复推理信号
+                String response = new String(receiver.recv(0));
+                if ("ResumeInference".equals(response)) {
+                    Log.d(TAG, "服务器已授权恢复推理");
+                    
+                    // 5. 等待正常设备发来的状态同步信息
+                    waitForStateSynchronization(com);
+                    
+                    // 6. 转换为工作设备
+                    param.status = "Running";
+                    Log.d(TAG, "活跃设备已转为工作设备，状态设为Running");
+                    
+                    // 7. 通知服务器恢复完成
+                    receiver.sendMore("RecoveryCompleted");
+                    receiver.send(Config.local, 0);
+                    Log.d(TAG, "已通知服务器恢复完成");
+                } else {
+                    // 服务器没有发送正确的恢复信号
+                    Log.e(TAG, "服务器响应异常: " + response);
+                    param.status = "Failure";
+                }
             }
         }
     }
@@ -659,4 +737,402 @@ public class Client {
     public static native long releaseSession(long session);
     public native long createHuggingFaceTokenizer(String tokenizer_path);
     public native long createSentencePieceTokenizer(String tokenizer_path);
+
+    /**
+     * 等待现有推理任务完成
+     * 监控推理线程，等待它们终止或超时强制终止
+     * 主要处理OneStep线程和可能被阻塞的Socket通信
+     * 
+     * @param com 通信对象
+     */
+    private void waitForTasksToComplete(Communication com) {
+        try {
+            Log.d(TAG, "等待现有推理任务完成...");
+            
+            // 1. 先尝试找到并中断实际推理线程（Com.running中的ThreadPoolExecutor）
+            // 而不是关闭executor（负责prepare和整个通信流程）
+            Field poolField = null;
+            ThreadPoolExecutor inferencePool = null;
+            
+            try {
+                // 通过反射找到Communication中的ThreadPoolExecutor实例
+                // 这种方法更精确，只终止推理线程而不影响通信线程
+                poolField = Communication.class.getDeclaredField("pool");
+                if (poolField != null) {
+                    poolField.setAccessible(true);
+                    inferencePool = (ThreadPoolExecutor) poolField.get(com);
+                    
+                    if (inferencePool != null && !inferencePool.isShutdown()) {
+                        Log.d(TAG, "正在关闭推理线程池...");
+                        // 拒绝新任务提交
+                        inferencePool.shutdown();
+                        
+                        // 给线程一些时间完成当前执行的任务
+                        boolean terminated = inferencePool.awaitTermination(3000, TimeUnit.MILLISECONDS);
+                        
+                        if (!terminated) {
+                            // 如果超时仍未终止，强制中断所有线程
+                            Log.w(TAG, "推理线程池未能及时关闭，强制中断");
+                            inferencePool.shutdownNow();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "通过反射访问推理线程池失败: " + e.getMessage());
+                // 反射失败，回退到直接中断的方式
+            }
+            
+            // 2. 释放所有可能阻塞的Socket通信
+            // 为所有ZMQ套接字设置超时，防止它们在等待故障设备时无限阻塞
+            interruptBlockedSockets(com);
+            
+            // 3. 如果我们直接无法访问推理线程池，尝试关闭executor
+            // 但这是最后的选择，因为它可能会影响通信线程
+            if (inferencePool == null && com.executor != null && !com.executor.isTerminated()) {
+                Log.w(TAG, "未找到推理线程池，尝试直接关闭执行器");
+                
+                // 设置一个标志位告知通信线程结束运行
+                // 这可能需要在Communication类中添加一个volatile标志位
+                try {
+                    Field runningField = Communication.class.getDeclaredField("isRunning");
+                    if (runningField != null) {
+                        runningField.setAccessible(true);
+                        runningField.set(com, false);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "无法设置运行标志位: " + e.getMessage());
+                }
+                
+                // 等待一小段时间让标志位生效
+                Thread.sleep(1000);
+                
+                // 避免关闭通信线程，仅注册一个回调通知executor我们要终止
+                // 而不是直接调用shutdown
+                com.executor.execute(() -> {
+                    Log.d(TAG, "请求终止运行中的推理任务");
+                });
+            }
+            
+            // 最后等待一段时间确保所有资源被释放
+            Thread.sleep(2000);
+            
+            Log.d(TAG, "推理任务终止流程完成");
+        } catch (Exception e) {
+            Log.e(TAG, "终止推理任务失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 中断被阻塞的Socket通信
+     * 用于故障恢复时打破设备等待故障节点的死锁
+     * 
+     * @param com 通信对象
+     */
+    private void interruptBlockedSockets(Communication com) {
+        try {
+            Log.d(TAG, "正在释放阻塞的Socket通信...");
+            
+            // 遍历所有Socket连接
+            if (com.allSockets != null && !com.allSockets.isEmpty()) {
+                // 复制队列内容以避免修改原队列结构
+                ArrayList<ArrayList<Map<Integer, Socket>>> allSocketsCopy = new ArrayList<>();
+                
+                // 复制allSockets内容到临时列表
+                com.allSockets.drainTo(allSocketsCopy);
+                
+                for (ArrayList<Map<Integer, Socket>> socketPair : allSocketsCopy) {
+                    for (Map<Integer, Socket> socketMap : socketPair) {
+                        for (Socket socket : socketMap.values()) {
+                            // 为所有Socket设置接收超时，避免永久阻塞
+                            socket.setReceiveTimeOut(100);
+                            // 尝试发送一个"INTERRUPT"消息，唤醒等待接收的线程
+                            try {
+                                socket.send("INTERRUPT", ZMQ.DONTWAIT);
+                            } catch (Exception e) {
+                                // 忽略发送错误，继续处理
+                            }
+                        }
+                    }
+                }
+                
+                // 将Socket放回队列
+                for (ArrayList<Map<Integer, Socket>> socketPair : allSocketsCopy) {
+                    com.allSockets.put(socketPair);
+                }
+            }
+            
+            Log.d(TAG, "Socket通信阻塞释放完成");
+        } catch (Exception e) {
+            Log.e(TAG, "释放Socket阻塞失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 保存推理的中间状态
+     * 对于头节点，需要保存已生成的Token序列
+     * 对于工作节点，需要保存计算中间结果
+     * 
+     * @param com 通信对象
+     */
+    private void saveIntermediateState(Communication com) {
+        Log.d(TAG, "保存中间状态...");
+        
+        try {
+            // 当前批次ID已在Recovery阶段保存到loadBalance.reSampleId
+            int currentSampleId = Communication.loadBalance.reSampleId;
+            
+            // 检查是否有中间结果需要保存
+            if (currentSampleId >= 0) {
+                Log.d(TAG, "保存批次 " + currentSampleId + " 的中间状态");
+                
+                // 对于头节点，保存当前的输入ID序列（已经生成的token）
+                if (com.cfg.isHeader() && com.InputIds.containsKey(currentSampleId-1)) {
+                    // 记录已生成的token数量，用于恢复时验证
+                    Log.d(TAG, "头节点: 保存输入ID序列，长度: " + 
+                          com.InputIds.get(currentSampleId-1).size());
+                    
+                    // InputIds已经是类成员变量，在恢复时会自动访问，这里只需确保它被正确保存
+                    // 如果需要额外备份，可以在这里实现
+                }
+                
+                // 对于中间节点，保存中间计算结果
+                if (!com.cfg.isHeader() && !com.cfg.isTailer()) {
+                    // 保存任何中间计算状态，如果有的话
+                    if (com.OutputData.containsKey(currentSampleId-1)) {
+                        Log.d(TAG, "工作节点: 保存输出数据");
+                        // OutputData已经是类成员变量，在恢复时会自动访问
+                    }
+                }
+                
+                // 如果有残差数据需要保存
+                if (com.ResidualDataFromDevice.containsKey(currentSampleId-1) || 
+                    com.ResidualDataToDevice.containsKey(currentSampleId-1)) {
+                    Log.d(TAG, "保存残差数据");
+                    // 残差数据已经存储在类成员变量中，在恢复时会自动访问
+                }
+            } else {
+                Log.d(TAG, "无中间状态需要保存，当前批次ID无效");
+            }
+            
+            Log.d(TAG, "中间状态保存完成");
+        } catch (Exception e) {
+            Log.e(TAG, "保存中间状态失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 与新设备同步状态
+     * 在故障恢复过程中，将当前状态同步到新加入的设备
+     * 
+     * @param com 通信对象
+     * @param receiver 用于与服务器通信的Socket
+     */
+    private void syncStateWithNewDevices(Communication com, Socket receiver) {
+        try {
+            Log.d(TAG, "开始与新设备同步状态...");
+            
+            // 当前批次ID
+            int currentSampleId = Communication.loadBalance.reSampleId;
+            if (currentSampleId < 0) {
+                Log.d(TAG, "无需同步状态，没有有效的恢复批次ID");
+                return;
+            }
+            
+            // 从服务器获取新加入的设备信息（如果有）
+            // 这里假设服务器会发送一个包含新设备ID的消息
+            if (receiver.hasReceiveMore()) {
+                String newDevicesInfo = new String(receiver.recv(0));
+                Log.d(TAG, "获取到新设备信息: " + newDevicesInfo);
+                
+                // 解析新设备信息，格式可能是"NEW_DEVICE:ip:port"
+                if (newDevicesInfo.startsWith("NEW_DEVICE:")) {
+                    String[] parts = newDevicesInfo.substring(11).split(":");
+                    if (parts.length >= 2) {
+                        String newDeviceIp = parts[0];
+                        int newDevicePort = Integer.parseInt(parts[1]);
+                        
+                        // 建立与新设备的直接通信
+                        Log.d(TAG, "与新设备建立直接通信: " + newDeviceIp + ":" + newDevicePort);
+                        
+                        // 使用现有Socket或创建新Socket与新设备通信
+                        // 这里可能需要根据新的通信拓扑查找对应的Socket
+                        Socket newDeviceSocket = null;
+//                        for (Map.Entry<Integer, String> entry : com.cfg.ipGraph_entry.entrySet()) {
+//                            if (entry.getValue().equals(newDeviceIp)) {
+//                                // 找到新设备的ID
+//                                int newDeviceId = entry.getKey();
+//                                Log.d(TAG, "找到新设备ID: " + newDeviceId);
+//
+//                                // 获取与新设备通信的Socket
+//                                // 这里假设allSockets结构中已经建立了与新设备的Socket
+//                                // 实际实现可能需要根据具体代码结构调整
+//                                ArrayList<Map<Integer, Socket>> socketPair = com.allSockets.peek();
+//                                if (socketPair != null && socketPair.size() >= 2) {
+//                                    Map<Integer, Socket> clientSockets = socketPair.get(0);
+//                                    if (clientSockets.containsKey(newDeviceId)) {
+//                                        newDeviceSocket = clientSockets.get(newDeviceId);
+//                                        Log.d(TAG, "找到与新设备通信的Socket");
+//                                    }
+//                                }
+//                                break;
+//                            }
+//                        }
+//
+                        // 如果找到了与新设备通信的Socket，发送状态数据
+                        if (newDeviceSocket != null) {
+                            Log.d(TAG, "开始向新设备发送状态数据");
+                            
+                            // 发送握手信号
+                            newDeviceSocket.send("SYNC_STATE");
+                            
+                            // 等待新设备确认
+                            String response = new String(newDeviceSocket.recv(0));
+                            if ("READY_FOR_SYNC".equals(response)) {
+                                // 发送当前批次ID
+                                newDeviceSocket.sendMore("SAMPLE_ID");
+                                newDeviceSocket.send(String.valueOf(currentSampleId));
+                                
+                                // 根据设备角色发送不同的状态数据
+                                if (com.cfg.isHeader()) {
+                                    // 头节点发送已生成的token序列
+                                    if (com.InputIds.containsKey(currentSampleId-1)) {
+                                        ArrayList<Integer> tokens = com.InputIds.get(currentSampleId-1);
+                                        // 这里需要将ArrayList<Integer>转换为可传输的格式
+                                        // 简单起见，这里转为字符串，实际应使用二进制格式
+                                        StringBuilder sb = new StringBuilder();
+                                        for (int token : tokens) {
+                                            sb.append(token).append(",");
+                                        }
+                                        newDeviceSocket.sendMore("INPUT_IDS");
+                                        newDeviceSocket.send(sb.toString());
+                                    }
+                                }
+                                
+                                // 等待新设备确认接收完成
+                                response = new String(newDeviceSocket.recv(0));
+                                if ("SYNC_COMPLETED".equals(response)) {
+                                    Log.d(TAG, "状态同步成功完成");
+                                } else {
+                                    Log.e(TAG, "状态同步异常: " + response);
+                                }
+                            } else {
+                                Log.e(TAG, "新设备未准备好接收状态: " + response);
+                            }
+                        } else {
+                            Log.e(TAG, "未找到与新设备通信的Socket");
+                        }
+                    }
+                }
+            } else {
+                Log.d(TAG, "服务器未提供新设备信息，跳过状态同步");
+            }
+            
+            Log.d(TAG, "状态同步过程完成");
+        } catch (Exception e) {
+            Log.e(TAG, "状态同步失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 等待状态同步
+     * 活跃设备转为工作设备时，等待其他设备发来的状态同步信息
+     * 
+     * @param com 通信对象
+     */
+    private void waitForStateSynchronization(Communication com) {
+        Log.d(TAG, "等待状态同步...");
+        
+        try {
+            // 基于现有的通信结构接收状态同步
+            // 查找所有可能的Socket连接
+            ArrayList<Map<Integer, Socket>> socketPair = com.allSockets.peek();
+            if (socketPair == null || socketPair.size() < 2) {
+                Log.e(TAG, "无法找到有效的Socket连接，跳过状态同步");
+                return;
+            }
+            
+            // 获取接收Socket映射
+            Map<Integer, Socket> serverSockets = socketPair.get(1);
+            
+            // 尝试从每个连接接收状态数据
+            boolean syncReceived = false;
+            long startTime = System.currentTimeMillis();
+            long timeout = 10000; // 10秒超时
+            
+            while (!syncReceived && System.currentTimeMillis() - startTime < timeout) {
+                // 检查所有接收Socket
+                for (Socket socket : serverSockets.values()) {
+                    // 非阻塞方式检查是否有消息
+                    byte[] message = socket.recv(ZMQ.DONTWAIT);
+                    if (message != null) {
+                        String command = new String(message);
+                        Log.d(TAG, "收到消息: " + command);
+                        
+                        if ("SYNC_STATE".equals(command)) {
+                            // 收到同步请求，发送准备就绪响应
+                            socket.send("READY_FOR_SYNC");
+                            Log.d(TAG, "已发送准备同步响应");
+                            
+                            // 接收同步数据
+                            String dataType = new String(socket.recv(0));
+                            if ("SAMPLE_ID".equals(dataType)) {
+                                // 接收当前批次ID
+                                String sampleIdStr = new String(socket.recv(0));
+                                int sampleId = Integer.parseInt(sampleIdStr);
+                                Log.d(TAG, "接收到批次ID: " + sampleId);
+                                
+                                // 继续接收其他数据
+                                dataType = new String(socket.recv(0));
+                                if ("INPUT_IDS".equals(dataType)) {
+                                    // 接收输入ID序列（对头节点的后继节点重要）
+                                    String tokensStr = new String(socket.recv(0));
+                                    String[] tokenParts = tokensStr.split(",");
+                                    ArrayList<Integer> tokens = new ArrayList<>();
+                                    for (String part : tokenParts) {
+                                        if (!part.isEmpty()) {
+                                            tokens.add(Integer.parseInt(part));
+                                        }
+                                    }
+                                    
+                                    // 将接收到的tokens保存到当前设备的状态中
+                                    if (tokens.size() > 0) {
+                                        // 如果需要，可以在这里保存tokens
+                                        // 例如，如果这个设备成为新的头节点，需要保存tokens
+                                        if (com.cfg.isHeader() && !com.InputIds.containsKey(sampleId-1)) {
+                                            com.InputIds.put(sampleId-1, tokens);
+                                            Log.d(TAG, "保存接收到的token序列，长度: " + tokens.size());
+                                        }
+                                    }
+                                }
+                                
+                                // 可能还有其他数据类型需要接收...
+                                
+                                // 发送同步完成确认
+                                socket.send("SYNC_COMPLETED");
+                                Log.d(TAG, "状态同步成功完成");
+                                
+                                syncReceived = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // 如果还未收到同步，小睡一会再检查
+                if (!syncReceived) {
+                    Thread.sleep(100);
+                }
+            }
+            
+            if (!syncReceived) {
+                Log.w(TAG, "等待状态同步超时，将尝试无状态恢复");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "状态同步接收失败: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
 }

@@ -364,7 +364,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 int keepAliveTime = 500;   // 线程空闲超时
                 try {
                     Log.d(TAG, "communication starts to running");
-                    // 启动实际推理任务，传入线程池参数和输入数据
+                    // 启动实际推理任务，传入线程池参数和输入数据，这个应该是核心的推理线程是不是？
                     com.running(corePoolSize, maximumPoolSize, keepAliveTime, test_input);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
