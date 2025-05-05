@@ -107,7 +107,7 @@ public class Config {
     public boolean isDecoderHeader(){
         return isDecoder;
     }
-
+//   这个地方会重置索引相关信息，之后建立sockets池的时候会利用这些信息
     public void buildCommunicationGraph(String graph){
         this.ipGraph =  graph.split(",");
 
@@ -133,7 +133,7 @@ public class Config {
         }
     }
 
-    // 根据当前设备IP地址在ipGraph中的索引确定设备Id
+    // 根据当前设备IP地址在ipGraph中的索引确定设备Id，这个很重要，后面的通信什么的都是根据这个建立的
     public void getDeviceId() {
         if (ipGraph != null) {
             deviceId = Arrays.asList(ipGraph).indexOf(Config.local);

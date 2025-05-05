@@ -1,3 +1,19 @@
+/**
+ * BackgroundService 是分布式推理系统的核心后台服务
+ * 主要功能：
+ * 1. 设备初始化和与服务器通信
+ * 2. 模型加载和准备
+ * 3. 接收用户输入并进行推理
+ * 4. 处理故障恢复
+ * 
+ * 该服务处理两种模式：
+ * - 工作模式(working)：正常参与推理计算
+ * - 活跃模式(active)：待命状态，随时准备替代故障设备
+ * 
+ * 设备角色：
+ * - 头节点(header)：接收用户输入，处理模型开始部分
+ * - 工作节点(worker)：处理模型中间层
+ */
 package com.example.distribute_ui.service;
 import android.app.Service;
 import android.content.Intent;
@@ -34,18 +50,28 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private boolean messageStatus = false;          // 是否收到消息
     public static boolean isServiceRunning = false; // 服务是否正在运行
 
-    private String messageContent = "";
+    private String messageContent = "";             // 存储用户输入的消息内容
 
-    // 订阅事件RunningStatusEvent，收到事件后启动后台线程处理
-    // 获取是否为运行状态
+    /**
+     * 监听RunningStatusEvent事件
+     * 当Communication类初始化完成后，会发送此事件
+     * 这个方法在后台线程中执行，用于更新服务的运行状态
+     * 
+     * @param event 包含运行状态的事件对象
+     */
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onRunningStatus(Events.RunningStatusEvent event){
         runningStatus = event.isRunning;
         System.out.println("Running Status is: " + runningStatus);
     }
 
-    // 订阅事件messageSentEvent，收到事件后启动后台线程处理
-    // 获取消息是否有消息与消息的内容
+    /**
+     * 监听messageSentEvent事件
+     * 当用户在聊天界面发送消息时触发
+     * 记录消息内容，用于后续推理处理
+     * 
+     * @param event 包含消息状态和内容的事件对象
+     */
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onMessageSentEvent(Events.messageSentEvent event) {
         messageStatus = event.messageSent;
@@ -54,15 +80,24 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         System.out.println("message Content is: " + messageContent);
     }
 
-    // 订阅事件enterChatEvent，收到事件后启动后台线程处理
-    // 获取是否应开始推理  推理开始标志
+    /**
+     * 监听enterChatEvent事件
+     * 当用户进入聊天界面时触发
+     * 用于标记推理过程是否应该开始
+     * 
+     * @param event 包含进入聊天状态的事件对象
+     */
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onEnterChatEvent(Events.enterChatEvent event) {
         shouldStartInference = event.enterChat;
         System.out.println("ShouldStartInference is: " + shouldStartInference);
     }
 
-    // 从config.properties中获取服务器IP地址
+    /**
+     * 从配置文件中获取服务器IP地址
+     * 
+     * @return 服务器IP地址字符串
+     */
     private String getServerIPAddress() {
         String serverIP = "";
         Properties properties = new Properties();
@@ -78,7 +113,13 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         return serverIP;
     }
 
-    // 检查模型目录是否为空
+    /**
+     * 检查模型目录是否为空
+     * 用于判断模型文件是否已下载完成
+     * 
+     * @param modelPath 模型文件路径
+     * @return 如果目录为空返回true，否则返回false
+     */
     private boolean isModelDirectoryEmpty(String modelPath) {
         File modelDir = new File(modelPath + "/device");
         if (modelDir.isDirectory()) {
@@ -88,14 +129,36 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         // Return true if it's not a directory, indicating "empty" in this context.
         return true;
     }
-
-    // 传递参数更新DataRepository中isDirEmptyLiveData的值
+    // 当服务启动（通过startService(Intent)或bind）时调用的方法
+    /**
+     * 更新模型目录状态到数据仓库
+     * 当模型准备就绪后，通知UI更新
+     * 
+     * @param isDirEmpty 目录是否为空
+     */
     private void updateIsDirEmpty(boolean isDirEmpty) {
         // Update the repository with the new value
         DataRepository.INSTANCE.setIsDirEmpty(isDirEmpty);
     }
 
-    // 当服务启动（通过startService(Intent)或bind）时调用的方法
+    /**
+     * 服务启动时执行的回调方法
+     * 负责初始化推理环境并启动推理过程
+     * 
+     * 整体流程：
+     * 1. 获取设备角色、模型和服务器信息
+     * 2. 创建配置对象和通信对象
+     * 3. 向服务器注册并获取工作状态(working/active)
+     * 4. 根据状态执行不同的初始化流程
+     * 5. 等待模型准备完成
+     * 6. 对于头节点，等待用户输入开始推理
+     * 7. 执行实际推理任务
+     * 
+     * @param intent 包含启动参数的Intent
+     * @param flags 启动标志
+     * @param startId 启动ID
+     * @return 服务启动模式
+     */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {  // flags和startId（用于标识服务，在终止服务时需要）由系统自动传递
         Log.d(TAG, "background service started");
@@ -110,12 +173,14 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         }
         Log.d(TAG, "role is " + role);
 
+        // 获取模型名称
         String modelName = "";
         if (intent != null && intent.hasExtra("model")) {   // 提取Intent中附加的额外信息"model"的值
             modelName = intent.getStringExtra("model");     // 获取模型名称
             System.out.println("model name is: "+ modelName);
         }
 
+        // 获取服务器IP
         String server_ip;
         if (intent != null && intent.hasExtra("ip")) {
             server_ip = intent.getStringExtra("ip");
@@ -144,9 +209,9 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             // 1. send IP to server to request model
             // 与服务器建立连接，发送自身ip（对头结点还需加上模型名称），根据从服务器接受信息决定need_monitor为true/false
             if (role.equals("header")) {
-                serverStatus = com.sendIPToServer(role, finalModelName);
+                serverStatus = com.sendIPToServer(role, finalModelName); // 头节点需要提供模型名称
             } else {
-                serverStatus = com.sendIPToServer(role, "");
+                serverStatus = com.sendIPToServer(role, ""); // 工作节点不需要提供模型名称
             }
             Log.d(TAG, "serverStatus = " + serverStatus);
 
@@ -214,6 +279,8 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                     break; // Exit the loop if the thread is interrupted
                 }
             }
+            
+            // 检查模型文件是否已准备就绪
             boolean isDirEmpty = isModelDirectoryEmpty(com.param.modelPath);
             Log.d(TAG, "check the direction is empty: " + isDirEmpty);
             if (runningStatus && !isDirEmpty){
@@ -225,8 +292,8 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 }
             }
 
-            // 4. Starting from here we need to based on the ACTION_ENTER_CHAT_SCREEN to start inference
-            // 等待直到shouldStartInference为true
+            // 对于头节点，等待用户确认开始推理
+            // 当用户点击开始推理按钮时，会发送enterChatEvent事件，将shouldStartInference设为true
             if (cfg.isHeader()) {
                 while (!shouldStartInference) {
                     try {
@@ -240,7 +307,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
             // 对头结点的推理过程
             if (shouldStartInference && cfg.isHeader()){
-                // 4.1 分类任务的两个种类
+                // 设置分类标签
                 com.param.classes = new String[]{"Negative", "Positive"};
                 // 4.2 Dataset would be used if we need conduct evaluation experiment
                 Dataset dataset = null;
@@ -267,6 +334,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                     }
                 }
 
+                // 创建线程处理用户输入
                 if (cfg.isHeader()) {
                     new Thread(() -> {
                         int j = 0;  // 记录当前批次序号
@@ -279,6 +347,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                                     throw new RuntimeException(e);
                                 }
                             } else {
+                                // 收到新消息，处理并添加到输入列表
                                 System.out.println("current numSample:" + j + ", New prompt:" + messageContent);
 //                                messageContent = String.format("User: %s. Response:", messageContent); // 格式化prompt，用指定内容替换占位符
                                 userinput = messageContent;
@@ -288,29 +357,35 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                         }
                     }).start();
                 }
-                int corePoolSize = 2;
-                int maximumPoolSize = 2;
-                int keepAliveTime = 500;
+                
+                // 设置线程池参数并启动推理
+                int corePoolSize = 2;      // 核心线程数
+                int maximumPoolSize = 2;   // 最大线程数
+                int keepAliveTime = 500;   // 线程空闲超时
                 try {
                     Log.d(TAG, "communication starts to running");
+                    // 启动实际推理任务，传入线程池参数和输入数据
                     com.running(corePoolSize, maximumPoolSize, keepAliveTime, test_input);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
                 }
                 double startTime = System.nanoTime();
-                results = com.timeUsage;
+                results = com.timeUsage;   // 保存时间统计结果
 
                 Log.d(TAG, "Results Computation Time: " + (System.nanoTime() - startTime) / 1000000000.0);
                 return null;
             }
 
-            // 对非头结点的推理过程
+            // 非头节点推理流程
+            // 工作节点不需要用户输入，直接执行推理任务
             else if (!shouldStartInference && !cfg.isHeader()){
                 com.param.classes = new String[]{"Negative", "Positive"};
                 Dataset dataset = null;
+                // 等待批处理大小设置完成
                 while (com.param.numSample <= 0)
                     Thread.sleep(1000);
-//                String[] test_input = new String[com.param.numSample];
+                
+                // 工作节点不需要实际的输入数据，但需要提供一个空列表
                 ArrayList<String> test_input = new ArrayList<>();
                 int corePoolSize = 2;
                 int maximumPoolSize = 2;
@@ -318,6 +393,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
                 try {
                     Log.d(TAG, "communication starts to running");
+                    // 启动推理任务
                     com.running(corePoolSize, maximumPoolSize, keepAliveTime, test_input);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
@@ -328,25 +404,38 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             return null;
         });
 
-        return START_STICKY; // 表示如果系统杀死了服务，系统会重新启动服务并尽可能地重新传递Intent
+        return START_STICKY; // 如果系统杀死服务，会尝试重新启动并恢复Intent
     }
 
+    /**
+     * 服务绑定回调
+     * 本服务不支持绑定，返回null
+     */
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
     }
+    
+    /**
+     * 服务创建回调
+     * 注册EventBus事件监听
+     */
     @Override
     public void onCreate() {
         super.onCreate();
         isServiceRunning = true;
-        EventBus.getDefault().register(this);
+        EventBus.getDefault().register(this);  // 注册事件总线监听器
     }
 
+    /**
+     * 服务销毁回调
+     * 取消EventBus事件监听
+     */
     @Override
     public void onDestroy() {
         super.onDestroy();
         isServiceRunning = false;
-        EventBus.getDefault().unregister(this);
+        EventBus.getDefault().unregister(this);  // 取消事件总线监听器
     }
 }

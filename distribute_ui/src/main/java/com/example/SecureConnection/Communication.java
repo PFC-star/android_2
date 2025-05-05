@@ -136,7 +136,14 @@ public class Communication {
 
         module_on_devices = new TreeMap<>();
     }
-
+    /**
+     * 获取当前推理的批次号
+     * @return 当前批次号（sampleId）
+     */
+    public int getCurrentSampleId() {
+        // 假设 sampleId 是 Communication 类的字段，记录当前批次
+        return sampleId;
+    }
     public String sendIPToServer(String role, String modelRequest) throws JSONException {
         rootSocket = beClient.establish_connection(context, SocketType.DEALER, cfg.rootPort, cfg.root); // 与服务器建立连接
         Log.d(TAG, "socket establish connection");
@@ -166,6 +173,13 @@ public class Communication {
     
     /**
      * 启动心跳检测线程，定期向服务器发送心跳信息
+     * 
+     * 心跳检测是故障监控的关键机制，通过定期发送心跳包实现：
+     * 1. 向服务器证明设备仍然在线
+     * 2. 接收服务器发送的系统状态信息
+     * 3. 检测并响应SYSTEM_FAILURE信号，触发故障恢复流程
+     * 
+     * 心跳频率：每10秒发送一次，低于服务器超时阈值
      */
     public void startHeartbeatDetection() {
         if (heartbeatThread != null && heartbeatThread.isAlive()) {
@@ -237,6 +251,8 @@ public class Communication {
     
     /**
      * 停止心跳检测线程
+     * 
+     * 在设备关闭或任务完成时调用，确保心跳线程正确终止
      */
     public void stopHeartbeatDetection() {
         isHeartbeatRunning = false;
@@ -249,8 +265,16 @@ public class Communication {
     
     /**
      * 处理系统故障
-     * 当检测到系统故障时，此方法将被调用
-     * 注意：此方法现在主要由communicationOpenClose方法调用，不再直接处理通信
+     * 当检测到系统故障时，此方法将被调用进行恢复
+     * 
+     * 主要恢复步骤：
+     * 1. 标记设备状态为"Recovering"
+     * 2. 触发负载重平衡，更新任务分配
+     * 3. 清理现有连接并重新建立通信
+     * 4. 恢复中断的推理过程
+     * 5. 将状态恢复为"Running"
+     * 
+     * 注意：此方法由Client.communicationOpenClose调用，不再直接处理通信
      */
     public void handleSystemFailure() {
         // 如果已经在故障处理或恢复中，避免重复处理
@@ -302,6 +326,9 @@ public class Communication {
     
     /**
      * 清理现有的Socket连接
+     * 
+     * 在故障恢复过程中，需要关闭并重新创建所有通信套接字
+     * 本方法安全地关闭所有现有连接，确保资源正确释放
      */
     void cleanExistingConnections() {
         try {
@@ -319,83 +346,36 @@ public class Communication {
             Log.e(TAG, "Error cleaning existing connections: " + e.getMessage());
         }
     }
-    
+
+
     /**
-     * 恢复推理过程
+     * 从指定的批次号恢复推理
+     * @param startSampleId 开始恢复的批次号
      */
-    void resumeInference() {
-        try {
-            Log.d(TAG, "恢复推理过程");
-            
-            // 检查当前的状态和进度
-            if (sampleId < param.numSample) {
-                // 还有未完成的样本，重新开始从当前样本推理
-                Log.d(TAG, "Resuming inference from sample " + sampleId);
-                
-                // 清理可能的中间状态，但保留输入数据
-                Map<Integer, ArrayList<Integer>> savedInputIds = null;
-                if (cfg.isHeader()) {
-                    // 头节点需要保存输入数据以便恢复
-                    savedInputIds = new HashMap<>(InputIds);
+    public void resumeInference(int startSampleId) throws IOException, InterruptedException {
+        // 重置 sampleId 为恢复的批次
+        this.sampleId = startSampleId;
+
+        // 如果是头节点，重新收集用户输入（如果需要）
+        if (cfg.isHeader()) {
+            ArrayList<String> test_input = new ArrayList<>();
+            // 假设用户输入已存储在 messageContent 中，重新收集剩余批次
+            for (int i = startSampleId; i < param.numSample; i++) {
+                // 等待新输入或使用已有输入
+                while (!messageStatus) {
+                    Thread.sleep(1000);
                 }
-                
-                OutputData.clear();
-                ResidualDataFromDevice.clear();
-                ResidualDataToDevice.clear();
-                
-                if (cfg.isHeader()) {
-                    // 恢复头节点的输入数据
-                    if (savedInputIds != null) {
-                        // 仅保留已完成处理的样本的数据
-                        for (int i = 0; i < sampleId; i++) {
-                            if (savedInputIds.containsKey(i)) {
-                                InputIds.put(i, savedInputIds.get(i));
-                                Log.d(TAG, "Restored input data for sample " + i);
-                            }
-                        }
-                    }
-                    
-                    // 如果当前正在处理的样本有部分输入数据，也需要恢复
-                    if (savedInputIds != null && savedInputIds.containsKey(sampleId-1)) {
-                        InputIds.put(sampleId-1, savedInputIds.get(sampleId-1));
-                        Log.d(TAG, "Restored in-progress sample data for sample " + (sampleId-1));
-                        
-                        // 记录恢复的数据大小，用于调试
-                        Log.d(TAG, "Restored data size: " + InputIds.get(sampleId-1).size() + " tokens");
-                        
-                        // 检查是否有足够的输入标记以继续处理
-                        if (InputIds.get(sampleId-1).size() > 0) {
-                            // 获取最后生成的token，可用于显示
-                            int lastToken = InputIds.get(sampleId-1).get(InputIds.get(sampleId-1).size() - 1);
-                            String lastTokenText = decodeID(new int[]{lastToken}, tokenizer);
-                            Log.d(TAG, "Last generated token before failure: " + lastTokenText);
-                            
-                            // 更新UI显示，通知用户恢复了之前的生成
-                            ArrayList<Integer> decodeList = InputIds.get(sampleId-1);
-                            String decodedString = decodeID(Utils.convertArrayListToIntArray(
-                                    Objects.requireNonNull(decodeList)), tokenizer);
-                            System.out.println("Recovered generated text: " + decodedString);
-                            DataRepository.INSTANCE.updateDecodingString(decodedString);
-                        }
-                    }
-                    
-                    Log.d(TAG, "Header node input data resynchronized");
-                }
-                
-                // 通知服务器准备好继续推理
-                rootSocket.sendMore("RESUME_INFERENCE");
-                rootSocket.send(String.valueOf(sampleId));
-                
-                Log.d(TAG, "Inference process resumed");
-            } else {
-                Log.d(TAG, "No more samples to process, inference already completed");
+                test_input.add(messageContent);
+                messageStatus = false; // 重置消息状态
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Error resuming inference: " + e.getMessage());
-            e.printStackTrace();
+            // 重新启动推理
+            running(param.corePoolSize, param.corePoolSize, 500, test_input);
+        } else {
+            // 非头节点直接启动推理
+            ArrayList<String> test_input = new ArrayList<>();
+            running(param.corePoolSize, param.corePoolSize, 500, test_input);
         }
     }
-
     // 运行负责函数Prepare的线程
     public void runPrepareThread(String param){
         executor = Executors.newFixedThreadPool(2); // 创建一个最多2个线程同时执行的线程池
@@ -657,11 +637,13 @@ public class Communication {
                     pool.execute(new multiSteps(sampleId, latch));  // 提交新任务，实际执行的是multiSteps.run()
                     sampleId += 1;      // 批次计数+1
                 }else if (LB_Pause.condition){
+//
                     System.out.println("resampleId " + loadBalance.reSampleId);
                     System.out.println("wait the Process to Finish");
                     System.out.println("Active Thread Count: " + (pool.getActiveCount() + waitingQueue.size()));
                     if ((pool.getActiveCount() + waitingQueue.size()) == 0 && (loadBalance.reSampleId != -1 && sampleId >= loadBalance.reSampleId)) {
                         // Launch re-load when no active process in the pool
+//                        一旦进入会暂停新任务提交，并且等待当前没有新任务的时候才进行Load Balance
                         System.out.println("===================== Load Balance =====================");
                         loadBalance.ModifySession();
                         loadBalance.reLoadBalance();
@@ -840,73 +822,111 @@ public class Communication {
         }
     }
 
+    /**
+     * OneStep类用于管理分布式推理中的单步处理流程
+     * 实现设备间的数据接收、计算处理和结果发送
+     */
     public class OneStep {
-        // 实现接收数据、计算数据、发送数据
-        private final Map<Integer, Socket>  serverSocketMap;
-        private final Map<Integer, Socket>  clientSocketMap;
-        private final Socket  serverSocket;
-        private final Socket  clientSocket;
-        private final int sample_id;
+        // 存储与其他设备通信的Socket映射
+        private final Map<Integer, Socket> serverSocketMap;   // 服务端Socket映射，用于接收数据
+        private final Map<Integer, Socket> clientSocketMap;   // 客户端Socket映射，用于发送数据
+        private final Socket serverSocket;                    // 从前驱节点接收数据的Socket
+        private final Socket clientSocket;                    // 发送数据给后继节点的Socket
+        private final int sample_id;                          // 当前处理的样本/批次ID
 
-        private int current_token_index;
+        private int current_token_index;                      // 当前处理的token索引
 
-        public OneStep(int sample_id, Map<Integer, Socket> serverSide, Map<Integer, Socket>  clientSide) {
+        /**
+         * 构造函数，初始化通信Socket和样本ID
+         * 
+         * @param sample_id 当前处理的样本ID
+         * @param serverSide 服务端Socket映射，用于接收数据
+         * @param clientSide 客户端Socket映射，用于发送数据
+         */
+        public OneStep(int sample_id, Map<Integer, Socket> serverSide, Map<Integer, Socket> clientSide) {
             this.sample_id = sample_id;
             this.serverSocketMap = serverSide;
             this.clientSocketMap = clientSide;
-            this.serverSocket = serverSide.get(cfg.prevDeviceId()); // 从前驱结点接收的Socket
-            this.clientSocket = clientSide.get(cfg.nextDeviceId()); // 发送给后继结点的Socket
+            this.serverSocket = serverSide.get(cfg.prevDeviceId()); // 从前驱节点接收的Socket
+            this.clientSocket = clientSide.get(cfg.nextDeviceId()); // 发送给后继节点的Socket
         }
 
+        /**
+         * 作为客户端处理数据的方法
+         * 负责向前驱节点请求数据，并接收前驱节点发送的数据
+         * 
+         * @param receivedId 接收的样本ID
+         * @return 处理后的样本ID
+         * @throws InterruptedException 线程中断时抛出
+         */
         public int procssingAsClient(int receivedId) throws InterruptedException {
-            if (!cfg.isHeader()) {  // 如果当前设备不是头设备
+            if (!cfg.isHeader()) {  // 如果当前设备不是头节点
                 System.out.println("Start to be a Client");
 
-                serverSocket.send("Request Data");  // 向前驱结点请求数据
-                receivedId = Utils.convertByteArrayToInt(serverSocket.recv(0));
+                serverSocket.send("Request Data");  // 向前驱节点发送数据请求
+                receivedId = Utils.convertByteArrayToInt(serverSocket.recv(0));  // 接收并解析样本ID
 
-                // 启动一个线程异步接收残差数据
+                // 启动一个线程异步接收残差数据（用于模型优化和加速）
                 Thread workerThread = new Thread(new ReceiveResidualConnection(receivedId, serverSocketMap));
                 workerThread.start();
 
-                // 如果接收到的数据批次不匹配当前批次，输出警告
+                // 验证接收的样本ID是否匹配当前处理的样本ID，如不匹配则输出警告
                 if (receivedId != this.sample_id) {
                     System.out.println("Client: Data out of the order, sampleId: " + this.sample_id + ", receivedId: " + receivedId);
                 }
 
-                // 从服务器接收数据并存储到InputData中
+                // 从前驱节点接收实际数据并存储到InputData映射中
                 byte[] msgFrom = serverSocket.recv(0);
                 InputData.put(receivedId, msgFrom);
                 System.out.println("Received Data");
-                // 等待线程完成
+                
+                // 等待残差数据接收线程完成
                 workerThread.join();
                 System.out.println("Received ResData");
 
             } else {
-                // load data from the local
+                // 作为头节点时，从本地加载数据而不是从其他节点接收
                 if (logits.get(receivedId) == null) {
                     System.out.println("Load Data");
                 }
             }
-            return receivedId; // Either comes from received id or direct sample id
+            return receivedId; // 返回处理的样本ID
         }
 
+        /**
+         * 作为服务器处理数据的方法
+         * 负责向后继节点发送数据响应
+         * 
+         * @param receivedId 当前处理的样本ID
+         * @throws InterruptedException 线程中断时抛出
+         */
         public void processAsServer(int receivedId) throws InterruptedException {
-            // return data to the header machine;
+            // 向头节点或后继节点返回数据
             if (clientSocket == null)
-                System.out.println("ProcessAsServer Error");
+                System.out.println("ProcessAsServer Error");  // Socket为空时报错
 
             System.out.println("Start to be a Server");
-            byte[] comefrom_id = clientSocket.recv(0);
-            byte[] msgTo = clientSocket.recv(0);
+            
+            // 接收来自后继节点的请求
+            byte[] comefrom_id = clientSocket.recv(0);  // 接收请求方ID
+            byte[] msgTo = clientSocket.recv(0);        // 接收请求内容
+            
+            // 如果收到数据请求
             if (new String(msgTo).contains("Request Data")) {
+                // 检查是否有可发送的数据
                 if (OutputData.containsKey(receivedId)) {
                     byte[] id = "from".getBytes();
+                    
+                    // 启动线程发送残差数据
                     Thread workerThread = new Thread(new SendResidualConnection(receivedId, clientSocketMap));
                     workerThread.start();
+                    
+                    // 发送样本ID
                     id = Utils.convertIntToByteArray(receivedId);
-                    clientSocket.sendMore(comefrom_id);
-                    clientSocket.sendMore(id);
+                    clientSocket.sendMore(comefrom_id);  // 首先发送请求方ID
+                    clientSocket.sendMore(id);           // 然后发送样本ID
+                    
+                    // 发送输出数据，对于尾节点且为生成任务时，发送特定解码ID
                     if (cfg.isTailer() && (param.task_type.equals("generation"))) {
                         byte[] decode_id = OutputData.get(receivedId);
                         clientSocket.send(decode_id, 0);
@@ -914,153 +934,248 @@ public class Communication {
                         clientSocket.send(OutputData.get(receivedId), 0);
                     }
                 } else {
+                    // 数据不存在时输出警告
                     System.out.println(receivedId + " is not in the OutputData");
                 }
             }
             System.out.println("Sent Data");
         }
 
+        /**
+         * 从尾节点获取结果的方法
+         * 仅头节点使用，用于获取整个分布式推理的最终结果
+         * 
+         * @param receivedId 当前处理的样本ID
+         * @return 处理状态标志：0表示处理完成，1表示继续处理
+         */
         public int obtainResultsFromTailer(int receivedId) {
-            // Special for header to obtain results from tailer
-            int flag = 1;
+            // 头节点特有的从尾节点获取结果的功能
+            int flag = 1;  // 默认继续处理标志
+            
             if (cfg.isHeader()) {
                 System.out.println("Start to obtain result from tailer");
-                // Handle the case header to request tailer results
+                
+                // 向尾节点请求结果
                 serverSocket.send("Request Data");
-                receivedId = Utils.convertByteArrayToInt(serverSocket.recv(0));
+                receivedId = Utils.convertByteArrayToInt(serverSocket.recv(0));  // 接收样本ID
 
-
+                // 验证样本ID是否匹配
                 if (receivedId != this.sample_id) {
                     System.out.println("Server: Data out of the order, sampleId: " + this.sample_id + ", receivedId: " + receivedId);
                 }
+                
+                // 接收结果数据
                 byte[] res = serverSocket.recv(0);
+                
+                // 根据任务类型处理数据
                 if (param.task_type.equals("generation")) {
-//                    int decode_id = Utils.convertByteArrayToInt(res);
-//                    InputIds.get(receivedId).add(decode_id);
+                    // 生成任务：解析解码ID并添加到输入序列
                     int decode_id = deserializeInt(res);
                     System.out.println("Obtain decode_id: " + decode_id);
+                    
+                    // 如果解码ID为2(通常是结束标记)，设置完成标志
                     if(decode_id == 2){
                         flag = 0;
                     }
+                    
+                    // 将解码ID添加到输入序列
                     InputIds.get(receivedId).add(decode_id);
-//                    System.out.println("current InputIds: " + InputIds.get(receivedId).toString());
                 } else {
+                    // 非生成任务：直接存储logits数据
                     logits.put(receivedId, res);
                 }
             }
-            return flag;
+            return flag;  // 返回处理状态标志
         }
 
-
+        /**
+         * 执行完整的单步推理流程
+         * 包括客户端处理、推理计算、服务器处理和结果获取
+         * 
+         * @return 处理状态标志：0表示处理完成，1表示继续处理
+         * @throws RuntimeException 运行时异常
+         * @throws InterruptedException 线程中断时抛出
+         * @throws JSONException JSON处理异常
+         */
         public int run() throws RuntimeException, InterruptedException, JSONException {
-            int receivedId = this.sample_id;    // 获取当前批次
-            long startTime = System.nanoTime();
+            int receivedId = this.sample_id;    // 获取当前批次ID
+            long startTime = System.nanoTime();  // 记录开始时间
 
-            receivedId = procssingAsClient(receivedId); // 处理作为客户端的部分
+            // 第一步：作为客户端接收数据
+            receivedId = procssingAsClient(receivedId);
             System.out.println("AsClient Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
 
+            // 第二步：执行推理计算
             startTime = System.nanoTime();
-            inferenceProcedure(receivedId); // 执行推理进程
-
+            inferenceProcedure(receivedId);  // 调用推理处理方法
             System.out.println("Inference Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
 
+            // 第三步：作为服务器发送数据
             startTime = System.nanoTime();
             processAsServer(receivedId);
             System.out.println("AsServer Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
 
+            // 第四步：获取尾节点结果
             startTime = System.nanoTime();
-//            receivedId = obtainResultsFromTailer(receivedId);
-            int flag = obtainResultsFromTailer(receivedId);
+            int flag = obtainResultsFromTailer(receivedId);  // 获取处理状态标志
             System.out.println("ObtainResult Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
 
-//            return receivedId;
-            return flag;
+            return flag;  // 返回处理状态标志
         }
-
     }
 
+    /**
+     * 更新通信Socket的方法
+     * 为每个处理核心创建与前驱和后继节点通信的Socket
+     * 
+     * @param corePoolSize 线程池核心大小，决定创建的Socket组数量
+     * @throws InterruptedException 线程中断时抛出
+     */
     public void updateSockets(int corePoolSize) throws InterruptedException {
-        int j = cfg.ipGraph.length;
+        int j = cfg.ipGraph.length;  // 获取IP图的长度（设备总数）
         System.out.println("Graph length: " + j);
+        
+        // 为每个核心创建一组Socket
         for (int i = 0; i < corePoolSize; i++) {
-            ArrayList<Map<Integer, Socket>> socketContainer = new ArrayList<>();
+            ArrayList<Map<Integer, Socket>> socketContainer = new ArrayList<>();  // 创建Socket容器
+            
+            // 创建发送Socket映射
             Map<Integer, Socket> SendSocket = new HashMap<>();
-            for (Integer idx : sendDeviceIndex) {
-                Socket temp = beServer.establish_connection(context, SocketType.ROUTER, Config.port + j*i + (idx-cfg.deviceId));
-                temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + idx + "." + (Config.port + j*i + (idx-cfg.deviceId))).getBytes());
+            for (Integer idx : sendDeviceIndex) {  // 遍历需要发送数据的设备索引
+                // 创建路由型Socket（多对多通信）
+                Socket temp = beServer.establish_connection(context, SocketType.ROUTER, 
+                        Config.port + j*i + (idx-cfg.deviceId));  // 计算唯一端口号
+                
+                // 设置Socket标识
+                temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + idx + "." + 
+                        (Config.port + j*i + (idx-cfg.deviceId))).getBytes());
+                
+                // 将Socket添加到映射中
                 SendSocket.put(idx, temp);
             }
 
+            // 如果当前节点是尾节点，需要额外创建与头节点通信的Socket
             if (cfg.isTailer()){
-                Socket temp = beServer.establish_connection(context, SocketType.ROUTER, Config.port + j*i + 1);
-                temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + cfg.nextDeviceId() + "." + (Config.port + j*i + 1)).getBytes());
+                Socket temp = beServer.establish_connection(context, SocketType.ROUTER, 
+                        Config.port + j*i + 1);  // 使用特定端口
+                
+                temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + 
+                        cfg.nextDeviceId() + "." + (Config.port + j*i + 1)).getBytes());
+                
                 SendSocket.put(cfg.nextDeviceId(), temp);
             }
-//            clientSockets.put(SendSocket);
+            
+            // 将发送Socket映射添加到容器
             socketContainer.add(SendSocket);
 
+            // 创建接收Socket映射
             Map<Integer, Socket> receiveSocket = new HashMap<>();
-            for (Integer idx : receiveDeviceIndex) {
-                Socket temp = beClient.establish_connection(context, SocketType.DEALER, Config.port + j*i + (cfg.deviceId-idx), cfg.ipGraph[idx]);
-                temp.setIdentity(("DEALER Receive From: " + cfg.deviceId + " to " + idx + "." + (Config.port + j*i + (cfg.deviceId-idx))).getBytes());
+            for (Integer idx : receiveDeviceIndex) {  // 遍历需要接收数据的设备索引
+                // 创建经销商型Socket（多对一通信）
+                Socket temp = beClient.establish_connection(context, SocketType.DEALER, 
+                        Config.port + j*i + (cfg.deviceId-idx),  // 计算唯一端口号
+                        cfg.ipGraph[idx]);  // 连接目标设备IP
+                
+                // 设置Socket标识
+                temp.setIdentity(("DEALER Receive From: " + cfg.deviceId + " to " + 
+                        idx + "." + (Config.port + j*i + (cfg.deviceId-idx))).getBytes());
+                
+                // 将Socket添加到映射中
                 receiveSocket.put(idx, temp);
             }
 
+            // 如果当前节点是头节点，需要额外创建与尾节点通信的Socket
             if (cfg.isHeader()){
-                Socket temp = beClient.establish_connection(context, SocketType.DEALER, Config.port + j*i + 1, cfg.prevNodes.get(0));
-                temp.setIdentity(("DEALER Receive From: " + cfg.deviceId + " to " + cfg.nextDeviceId() + "." + (Config.port + j*i +1)).getBytes());
+                Socket temp = beClient.establish_connection(context, SocketType.DEALER, 
+                        Config.port + j*i + 1,  // 使用特定端口
+                        cfg.prevNodes.get(0));  // 连接前驱节点IP
+                
+                temp.setIdentity(("DEALER Receive From: " + cfg.deviceId + " to " + 
+                        cfg.nextDeviceId() + "." + (Config.port + j*i +1)).getBytes());
+                
                 receiveSocket.put(cfg.prevDeviceId(), temp);
             }
 
-//            serverSockets.put(receiveSocket);
+            // 将接收Socket映射添加到容器
             socketContainer.add(receiveSocket);
 
+            // 将整个Socket容器添加到全局Socket列表
             allSockets.put(socketContainer);
         }
 
-        System.out.println("Sockets are built successfully");
+        System.out.println("Sockets are built successfully");  // 输出Socket创建成功信息
     }
 
+    /**
+     * 获取需要发送残差数据的设备与模块映射
+     * 用于优化模型间残差连接的通信
+     */
     public void getSendResDevice2Device(){
-        sendD2D =  new TreeMap<>();
+        sendD2D = new TreeMap<>();  // 创建有序映射存储发送残差数据的设备-模块关系
+        
+        // 遍历所有发送索引
         for (ArrayList<JSONObject> sendIndexList : sendIndex.values()) {
+            // 如果存在残差索引（通常是第二个索引）
             if (sendIndexList.size() > 1) {
-                JSONObject sendResIndex = sendIndexList.get(1); // Obtain res Index
-                Iterator<String> keys = sendResIndex.keys();
+                JSONObject sendResIndex = sendIndexList.get(1);  // 获取残差索引
+                Iterator<String> keys = sendResIndex.keys();  // 获取所有模块键
+                
+                // 遍历所有模块
                 while (keys.hasNext()) {
-                    String k = keys.next();
-                    int device = module_on_devices.get(k);
+                    String k = keys.next();  // 获取模块名称
+                    int device = module_on_devices.get(k);  // 获取模块所在设备ID
+                    
+                    // 如果模块不在当前设备上，需要通过网络发送
                     if (device != cfg.deviceId) {
+                        // 如果映射中不存在该设备，则创建新列表
                         if (!sendD2D.containsKey(device))
                             sendD2D.put(device, new ArrayList<>());
+                        
+                        // 将模块名称添加到对应设备的列表中
                         sendD2D.get(device).add(k);
                     }
                 }
             }
         }
-        // Sort in case disorder
+        
+        // 对每个设备的模块列表进行排序，确保操作顺序一致
         for (List<String> i : sendD2D.values())
             Collections.sort(i);
     }
 
+    /**
+     * 获取需要接收残差数据的设备与模块映射
+     * 用于优化模型间残差连接的通信
+     */
     public void getReceiveResDevice2Device(){
-        receiveD2D =  new TreeMap<>();
+        receiveD2D = new TreeMap<>();  // 创建有序映射存储接收残差数据的设备-模块关系
+        
+        // 遍历所有接收索引
         for (Map.Entry<String, ArrayList<JSONObject>> receiveIndexList : receiveIndex.entrySet()) {
+            // 如果存在残差索引（通常是第二个索引）
             if (receiveIndexList.getValue().size() > 1) {
-                JSONObject receiveResIndex = receiveIndexList.getValue().get(1); // Obtain res Index
-                Iterator<String> keys = receiveResIndex.keys();
+                JSONObject receiveResIndex = receiveIndexList.getValue().get(1);  // 获取残差索引
+                Iterator<String> keys = receiveResIndex.keys();  // 获取所有模块键
+                
+                // 遍历所有模块
                 while (keys.hasNext()) {
-                    String k = keys.next();
-                    int device = module_on_devices.get(k);
+                    String k = keys.next();  // 获取模块名称
+                    int device = module_on_devices.get(k);  // 获取模块所在设备ID
+                    
+                    // 如果模块不在当前设备上，需要通过网络接收
                     if (device != cfg.deviceId) {
+                        // 如果映射中不存在该设备，则创建新列表
                         if (!receiveD2D.containsKey(device))
                             receiveD2D.put(device, new ArrayList<>());
+                        
+                        // 将当前模块名称添加到对应设备的列表中
                         receiveD2D.get(device).add(receiveIndexList.getKey());
                     }
                 }
             }
         }
-        // Sort if disorder
+        
+        // 对每个设备的模块列表进行排序，确保操作顺序一致
         for (List<String> i : receiveD2D.values())
             Collections.sort(i);
     }
