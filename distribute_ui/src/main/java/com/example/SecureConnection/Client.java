@@ -213,6 +213,8 @@ public class Client {
                 Log.d(TAG, "开始执行故障恢复过程 - Recovering");
 
                 // 等待现有任务完成
+                // 清理现有Socket连接
+                com.cleanExistingConnections();
                 waitForTasksToComplete(com);
                 Log.d(TAG, "所有正在进行的任务已终止");
                 
@@ -220,8 +222,7 @@ public class Client {
                 saveIntermediateState(com);
                 Log.d(TAG, "中间状态已保存");
 
-                // 清理现有Socket连接
-                com.cleanExistingConnections();
+
                 Log.d(TAG, "现有Socket连接已清理");
 
                 // 使用LoadBalance的方法更新设备映射和会话
@@ -232,18 +233,20 @@ public class Client {
                 Log.d(TAG, "负载均衡已重新计算");
 
                 // 重新创建Socket连接
+                Log.w(TAG, "重新创建Socket连接");
                 com.updateSockets(param.corePoolSize);
                 Log.d(TAG, "Socket池已根据新的通信拓扑更新");
 
                 // 向服务器发送恢复准备就绪信号
-                receiver.sendMore("RecoveryReady");
-                receiver.send(String.valueOf(com.sampleId));
-                Log.d(TAG, "已通知服务器恢复准备就绪，当前批次: " + com.sampleId);
-                
+                receiver.sendMore("WaitingStart");
+                receiver.send(Config.local, 0);
+
+                param.status = "WaitingStart";
+                Log.d(TAG, "已通知服务器恢复准备就绪，等待开始，当前批次: " + com.sampleId);
                 // 等待服务器发送恢复推理信号
                 String response = new String(receiver.recv(0));
-                if ("ResumeInference".equals(response)) {
-                    Log.d(TAG, "服务器已授权恢复推理");
+                if ("ResumeStart".equals(response)) {
+                    Log.d(TAG, "服务器已授权恢复推理 ResumeStart");
                     
                     // 重置重载标志，允许继续处理任务
                     Communication.loadBalance.setReSampleId(-1);
@@ -258,9 +261,9 @@ public class Client {
                     Log.d(TAG, "状态已恢复为Running，推理继续");
                     
                     // 通知服务器恢复完成
-                    receiver.sendMore("RecoveryCompleted");
+                    receiver.sendMore("Running");
                     receiver.send(Config.local, 0);
-                    Log.d(TAG, "已通知服务器恢复完成");
+                    Log.d(TAG, "已通知服务器恢复完成,Running");
                 } else {
                     // 服务器没有发送正确的恢复信号
                     Log.e(TAG, "服务器响应异常: " + response);
@@ -328,40 +331,23 @@ public class Client {
                 Log.d(TAG, "prepare msg: " + msg);
                 if (msg.equals("Prepare")) {    // 收到msg为"Prepare"时，修改status，准备好模型文件
 //                    先不准备模型
+                      param.status = "Prepare";
 //                    communicationPrepare(receiver, param, modelName, serverIp, role);  // 准备好解压后的模型文件
                 }
 
                 // 初始化负载均衡和模型（新建会话和分词器）
-//                LoadBalanceInitialization();
+                LoadBalanceInitialization();
 //                modelInitialization(cfg, param); //暂时先不加载权重
                 param.status = "Initialized";
                 System.out.println("Status: Initialized");
                 receiver.send("Initialized", 0);
-
                 msg = new String(receiver.recv(0));
-                System.out.println(msg);
+                Log.d(TAG, "prepare msg: " + msg);
 
-                if (msg.equals("Start")) {
-                    param.status = "Start";
-                    Log.d(TAG, "Status: Start");
-                    receiver.send("Running");
-                    Log.d(TAG, "Status: Running");
-                    param.status = "Running";
-                    if (param.status == "Running") {
-                        // 发送RunningStatusEvent事件使BackgroundService中的runningStatus为true
+                if (msg.equals("WaitingRecovery")) {
+                    param.status = "WaitingRecovery";
+                    Log.d(TAG, "Status: WaitingRecovery");
 
-                        EventBus.getDefault().post(new Events.RunningStatusEvent(true));
-                        Log.d(TAG, "Post Events.RunningStatusEvent(true)");
-                    }
-                }
-                if (msg.equals("WaitingStart")) {
-                    param.status = "WaitingStart";
-                    Log.d(TAG, "Status: WaitingStart");
-
-
-                    if (param.status == "WaitingStart") {
-
-                    }
                 }
 
             }
@@ -408,63 +394,38 @@ public class Client {
             else if (param.status.equals("Recovering")){
                 Log.d(TAG, "开始执行故障恢复过程 - Recovering（活跃设备）");
 
-                // 激活设备需要执行以下步骤
-                // 1. 加载模型文件（如果还未加载）
-                if (Communication.sessions.isEmpty()) {
-                    Log.d(TAG, "加载模型文件...");
-                    try {
-                        // 准备模型文件
-                        communicationPrepare(receiver, param, "model", cfg.root, role);
-                        
-                        // 初始化模型
-                        LoadBalanceInitialization();
-                        modelInitialization(cfg, param);
-                        Log.d(TAG, "模型加载完成");
-                    } catch (Exception e) {
-                        Log.e(TAG, "模型加载失败: " + e.getMessage());
-                        param.status = "Failure";
-                        receiver.send("LoadModelFailed");
-                        return;
+
+
+
+
+
+                // 重新创建Socket连接
+//                com.updateSockets(param.corePoolSize);
+//                Log.d(TAG, "Socket池已根据新的通信拓扑更新");
+                // 如果需要向其他设备同步状态，在此处实现
+                syncStateWithNewDevices(com, receiver);
+                // 向服务器发送恢复准备就绪信号
+                receiver.sendMore("WaitingStart");
+                receiver.send(Config.local, 0);
+                param.status = "WaitingStart";
+                Log.d(TAG, "已通知服务器恢复准备就绪，等待开始");
+                String msg = new String(receiver.recv(0));
+                System.out.println(msg);
+
+                if (msg.equals("Start")) {
+                    param.status = "Start";
+                    Log.d(TAG, "Status: Start");
+                    receiver.send("Running");
+                    Log.d(TAG, "Status: Running");
+                    param.status = "Running";
+                    if (param.status == "Running") {
+                        // 发送RunningStatusEvent事件使BackgroundService中的runningStatus为true
+
+                        EventBus.getDefault().post(new Events.RunningStatusEvent(true));
+                        Log.d(TAG, "Post Events.RunningStatusEvent(true)");
                     }
                 }
-                
-                // 2. 建立socket连接
-                try {
-                    com.updateSockets(param.corePoolSize);
-                    Log.d(TAG, "Socket连接已建立");
-                } catch (InterruptedException e) {
-                    Log.e(TAG, "Socket连接建立失败: " + e.getMessage());
-                    param.status = "Failure";
-                    receiver.send("CreateSocketFailed");
-                    return;
-                }
-                
-                // 3. 向服务器发送准备就绪信号
-                receiver.sendMore("RecoveryReady");
-                receiver.send(Config.local);
-                Log.d(TAG, "已通知服务器恢复准备就绪");
-                
-                // 4. 等待服务器返回恢复推理信号
-                String response = new String(receiver.recv(0));
-                if ("ResumeInference".equals(response)) {
-                    Log.d(TAG, "服务器已授权恢复推理");
-                    
-                    // 5. 等待正常设备发来的状态同步信息
-                    waitForStateSynchronization(com);
-                    
-                    // 6. 转换为工作设备
-                    param.status = "Running";
-                    Log.d(TAG, "活跃设备已转为工作设备，状态设为Running");
-                    
-                    // 7. 通知服务器恢复完成
-                    receiver.sendMore("RecoveryCompleted");
-                    receiver.send(Config.local, 0);
-                    Log.d(TAG, "已通知服务器恢复完成");
-                } else {
-                    // 服务器没有发送正确的恢复信号
-                    Log.e(TAG, "服务器响应异常: " + response);
-                    param.status = "Failure";
-                }
+
             }
         }
     }
@@ -763,7 +724,7 @@ public class Client {
                     inferencePool = (ThreadPoolExecutor) poolField.get(com);
                     
                     if (inferencePool != null && !inferencePool.isShutdown()) {
-                        Log.d(TAG, "正在关闭推理线程池...");
+                        Log.w(TAG, "正在关闭推理线程池...");
                         // 拒绝新任务提交
                         inferencePool.shutdown();
                         
@@ -782,9 +743,7 @@ public class Client {
                 // 反射失败，回退到直接中断的方式
             }
             
-            // 2. 释放所有可能阻塞的Socket通信
-            // 为所有ZMQ套接字设置超时，防止它们在等待故障设备时无限阻塞
-            interruptBlockedSockets(com);
+
             
             // 3. 如果我们直接无法访问推理线程池，尝试关闭executor
             // 但这是最后的选择，因为它可能会影响通信线程

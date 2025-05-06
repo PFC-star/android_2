@@ -26,7 +26,7 @@ public class  Server {
     public Socket establish_connection(ZContext context, SocketType type, int port) {
         Socket socket = context.createSocket(type);
 
-        Log.d(TAG, " Socket socket = context.createSocket(type);成功");
+
         // 检查端口是否被占用
         try {
             socket.bind("tcp://*:" + port);

@@ -363,8 +363,8 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 int maximumPoolSize = 2;   // 最大线程数
                 int keepAliveTime = 500;   // 线程空闲超时
                 try {
-                    Log.d(TAG, "communication starts to running");
-                    // 启动实际推理任务，传入线程池参数和输入数据，这个应该是核心的推理线程是不是？
+                    Log.w(TAG, "onStartCommand里进去的 communication starts to running");
+                    // 启动实际推理任务，传入线程池参数和输入数据，这个不是线程，是直接启动了，但是包裹在 ExecutorService executor里
                     com.running(corePoolSize, maximumPoolSize, keepAliveTime, test_input);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
@@ -392,8 +392,9 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 int keepAliveTime = 500;
 
                 try {
-                    Log.d(TAG, "communication starts to running");
+
                     // 启动推理任务
+                    Log.w(TAG, "onStartCommand里进去的 communication starts to running");
                     com.running(corePoolSize, maximumPoolSize, keepAliveTime, test_input);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);

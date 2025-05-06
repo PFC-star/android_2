@@ -297,6 +297,7 @@ public class Communication {
             loadBalance.reLoadBalance();
             
             // 重新创建Socket连接
+            Log.w(TAG, "重新创建Socket连接");
             updateSockets(param.corePoolSize);
             Log.d(TAG, "Device connections re-established");
             
@@ -331,10 +332,13 @@ public class Communication {
                 ArrayList<Map<Integer, Socket>> socketPair = allSockets.take();
                 for (Map<Integer, Socket> socketMap : socketPair) {
                     for (Socket socket : socketMap.values()) {
+                        socket.setLinger(0);//确保快速释放端口
                         socket.close();
                     }
+
                 }
             }
+
             Log.d(TAG, "Existing connections cleaned up");
         } catch (Exception e) {
             Log.e(TAG, "Error cleaning existing connections: " + e.getMessage());
@@ -439,6 +443,7 @@ public class Communication {
     public void runRunningThread(int corePoolSize, int maximumPoolSize, int keepAliveTime, ArrayList<String> input_data){
         executor.submit(()-> {
             try {
+                Log.w(TAG, "runPrepareThread进去的 communication starts to running");
                 this.running(corePoolSize, maximumPoolSize, keepAliveTime, input_data);
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -628,7 +633,8 @@ public class Communication {
     public void running(int corePoolSize, int maximumPoolSize, int keepAliveTime, ArrayList<String> input_data) throws Exception {
         // 重置运行标志
         isRunning = true;
-        
+//        启动running
+        Log.w(TAG, "启动running");
         while(!param.status.equals("Running")) {
             Thread.sleep(1000);
         }
@@ -660,6 +666,7 @@ public class Communication {
                 new ThreadPoolExecutor.AbortPolicy());
 
         // 为设备创建发送和接收的Socket连接，对头结点和尾结点有特殊处理
+        Log.w(TAG, "running线程内创建Socket连接");
         updateSockets(corePoolSize);
 
         System.out.println("Load Balance On Running");
@@ -696,6 +703,7 @@ public class Communication {
             if (pool.getActiveCount() + waitingQueue.size() < corePoolSize) {   // 检查线程池中是否可以添加新任务
                 if ((!LB_Pause.condition && loadBalance.reSampleId == -1 ) || sampleId < loadBalance.reSampleId) {  // 允许提交新任务的条件
                     latch.acquire();    // 获取等待信号量
+                    System.out.println("提交新任务，实际执行的是multiSteps.run()");
                     pool.execute(new multiSteps(sampleId, latch));  // 提交新任务，实际执行的是multiSteps.run()
                     sampleId += 1;      // 批次计数+1
                 }else if (LB_Pause.condition){
@@ -820,6 +828,7 @@ public class Communication {
                     try {   // 调用OneStep处理每个Token
                         int flag = 1;
 //                        receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run();
+                        // 顺序生成每一个token
                         flag = new OneStep(this.sample_id, serverSocket, clientSocket).run();
 
                         if (cfg.isHeader()) {
@@ -953,7 +962,7 @@ public class Communication {
 
                 // 设置临时接收超时，防止故障时永久阻塞
                 int originalTimeout = serverSocket.getReceiveTimeOut();
-                serverSocket.setReceiveTimeOut(5000); // 5秒超时
+//                serverSocket.setReceiveTimeOut(5000); // 5秒超时
                 
                 try {
                     serverSocket.send("Request Data");  // 向前驱节点发送数据请求
@@ -1146,7 +1155,7 @@ public class Communication {
                     
                     // 设置临时接收超时，防止故障时永久阻塞
                     int originalTimeout = serverSocket.getReceiveTimeOut();
-                    serverSocket.setReceiveTimeOut(5000); // 5秒超时
+//                    serverSocket.setReceiveTimeOut(5000); // 5秒超时
                     
                     // 接收样本ID
                     byte[] idData = serverSocket.recv(0);
