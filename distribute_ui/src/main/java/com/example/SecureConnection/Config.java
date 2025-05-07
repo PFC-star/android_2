@@ -137,6 +137,7 @@ public class Config {
     public void getDeviceId() {
         if (ipGraph != null) {
             deviceId = Arrays.asList(ipGraph).indexOf(Config.local);
+            Log.e(TAG, String.format("Current deviceId %d",deviceId));
         }else {
             deviceId = -1;
         }

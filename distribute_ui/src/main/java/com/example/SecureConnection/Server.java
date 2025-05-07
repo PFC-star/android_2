@@ -24,6 +24,12 @@ public class  Server {
     public Server() {}
 
     public Socket establish_connection(ZContext context, SocketType type, int port) {
+        try (java.net.ServerSocket testSocket = new java.net.ServerSocket(port)) {
+            testSocket.close();
+        } catch (IOException e) {
+            Log.e(TAG, "Port " + port + " is already in use: " + e.getMessage());
+            throw new ZMQException("Port " + port + " is already in use", ZMQ.Error.EADDRINUSE.getCode());
+        }
         Socket socket = context.createSocket(type);
 
 
@@ -43,9 +49,9 @@ public class  Server {
             throw e;
         }
         
-        Log.d(TAG, "socket.bind(\"tcp://*:\" + port);成功");
+
         socket.setIdentity(Config.local.getBytes());
-        Log.d(TAG, "  socket.setIdentity(Config.local.getBytes());成功");
+
         return socket;
     }
 

@@ -183,15 +183,6 @@ public class Client {
                 // 收到故障恢复信号，进入恢复流程
                 Log.d(TAG, "进入故障恢复状态 - Recovery");
                 
-                // 暂停所有推理线程（设置标志位阻止新任务提交）
-                Communication.LB_Pause.setConditionTrue();
-                Log.d(TAG, "已暂停所有推理线程，阻止新任务提交");
-                
-                // 保存当前批次ID用于后续恢复
-                // 这个只是保存了当前批次ID
-                Communication.loadBalance.setReSampleId(com.sampleId);
-                Log.d(TAG, "已保存当前批次ID: " + com.sampleId + " 用于恢复");
-                
                 // 向服务器发送恢复请求和自身IP
                 receiver.sendMore("Recovery");         
                 receiver.send(Config.local, 0);
@@ -206,70 +197,24 @@ public class Client {
                 receiveDependencyMap(receiver);
                 Log.d(TAG, "故障恢复信息接收完成");
                 
-                // 进入恢复处理阶段
-                param.status = "Recovering";
-            }
-            else if (param.status.equals("Recovering")){
-                Log.d(TAG, "开始执行故障恢复过程 - Recovering");
-
-                // 等待现有任务完成
-                // 清理现有Socket连接
-                com.cleanExistingConnections();
-                waitForTasksToComplete(com);
-                Log.d(TAG, "所有正在进行的任务已终止");
+                // 直接调用Communication的handleSystemFailure方法
+                // 该方法将直接更新Socket配置而不中断推理线程
+                com.handleSystemFailure();
                 
-                // 保存中间状态（如果还未保存），InputData,OutputData，InputIds这些
-                saveIntermediateState(com);
-                Log.d(TAG, "中间状态已保存");
-
-
-                Log.d(TAG, "现有Socket连接已清理");
-
-                // 使用LoadBalance的方法更新设备映射和会话
-                Communication.loadBalance.ModifySession();
-                Log.d(TAG, "设备会话映射已更新");
-                
-                Communication.loadBalance.reLoadBalance();
-                Log.d(TAG, "负载均衡已重新计算");
-
-                // 重新创建Socket连接
-                Log.w(TAG, "重新创建Socket连接");
-                com.updateSockets(param.corePoolSize);
-                Log.d(TAG, "Socket池已根据新的通信拓扑更新");
-
-                // 向服务器发送恢复准备就绪信号
+                // 向服务器发送恢复完成信号
                 receiver.sendMore("WaitingStart");
                 receiver.send(Config.local, 0);
 
-                param.status = "WaitingStart";
-                Log.d(TAG, "已通知服务器恢复准备就绪，等待开始，当前批次: " + com.sampleId);
-                // 等待服务器发送恢复推理信号
-                String response = new String(receiver.recv(0));
-                if ("ResumeStart".equals(response)) {
-                    Log.d(TAG, "服务器已授权恢复推理 ResumeStart");
-                    
-                    // 重置重载标志，允许继续处理任务
-                    Communication.loadBalance.setReSampleId(-1);
-                    Communication.LB_Pause.setConditionFalse();
-                    Log.d(TAG, "已重置标志位，允许推理继续");
-                    
-//                    // 如果需要向其他设备同步状态，在此处实现
-//                    syncStateWithNewDevices(com, receiver);
-                    
-                    // 恢复状态
-                    param.status = "Running";
-                    Log.d(TAG, "状态已恢复为Running，推理继续");
-                    
-                    // 通知服务器恢复完成
-                    receiver.sendMore("Running");
-                    receiver.send(Config.local, 0);
-                    Log.d(TAG, "已通知服务器恢复完成,Running");
-                } else {
-                    // 服务器没有发送正确的恢复信号
-                    Log.e(TAG, "服务器响应异常: " + response);
-                    param.status = "Failure";
+                String msg = new String(receiver.recv(0));
+                if (msg.equals("ResumeStart")) {  // 收到msg为"ResumeStart"时，表示可以恢复启动
+                    param.status = "ResumeStart";
+                    Log.d(TAG, "已通知服务器恢复完成,ResumeStart");
                 }
+
+                // 状态恢复为Running是在handleSystemFailure中完成的
+
             }
+
         }
     }
     
@@ -331,18 +276,23 @@ public class Client {
                 Log.d(TAG, "prepare msg: " + msg);
                 if (msg.equals("Prepare")) {    // 收到msg为"Prepare"时，修改status，准备好模型文件
 //                    先不准备模型
-                      param.status = "Prepare";
-//                    communicationPrepare(receiver, param, modelName, serverIp, role);  // 准备好解压后的模型文件
+
+                    communicationPrepare(receiver, param, modelName, serverIp, role);  // 准备好解压后的模型文件
                 }
 
                 // 初始化负载均衡和模型（新建会话和分词器）
-                LoadBalanceInitialization();
-//                modelInitialization(cfg, param); //暂时先不加载权重
+
+                modelInitialization(cfg, param); //暂时先不加载权重
                 param.status = "Initialized";
                 System.out.println("Status: Initialized");
                 receiver.send("Initialized", 0);
-                msg = new String(receiver.recv(0));
-                Log.d(TAG, "prepare msg: " + msg);
+                // 第一部分：client_id
+                byte[] clientIdBytes = receiver.recv(0); // 接收第一部分
+                String clientId = new String(clientIdBytes); // 转换为字符串（假设 client_id 是字符串）
+                Log.d(TAG, "Received client_id: " + clientId);
+                byte[] messageBytes = receiver.recv(0); // 接收第二部分
+                msg = new String(messageBytes); // 转换为字符串
+                Log.d(TAG, "msg: " + msg);
 
                 if (msg.equals("WaitingRecovery")) {
                     param.status = "WaitingRecovery";
@@ -397,14 +347,15 @@ public class Client {
 
 
 
-
-
-                // 重新创建Socket连接
-//                com.updateSockets(param.corePoolSize);
-//                Log.d(TAG, "Socket池已根据新的通信拓扑更新");
-                // 如果需要向其他设备同步状态，在此处实现
-                syncStateWithNewDevices(com, receiver);
-                // 向服务器发送恢复准备就绪信号
+//
+//
+//                // 重新创建Socket连接
+////                com.updateSockets(param.corePoolSize);
+////                Log.d(TAG, "Socket池已根据新的通信拓扑更新");
+//                // 如果需要向其他设备同步状态，在此处实现
+//                syncStateWithNewDevices(com, receiver);
+//                // 向服务器发送恢复准备就绪信号
+                LoadBalanceInitialization();
                 receiver.sendMore("WaitingStart");
                 receiver.send(Config.local, 0);
                 param.status = "WaitingStart";

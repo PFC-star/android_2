@@ -33,6 +33,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.json.JSONObject;
+import org.zeromq.ZMQException;
+
 import com.example.SecureConnection.Utils.LBPause;
 import com.example.distribute_ui.DataRepository;
 
@@ -202,8 +204,8 @@ public class Communication {
                         // 检查是否收到额外的系统状态信息
                         if (rootSocket.hasReceiveMore()) {
                             String systemStatus = new String(rootSocket.recv(0));
-                            Log.d(TAG, "System status: " + systemStatus);
-                            Log.d(TAG, "Current param status: " +  param.status);
+//                            Log.d(TAG, "System status: " + systemStatus);
+//                            Log.d(TAG, "Current param status: " +  param.status);
                             
                             // 如果系统出现故障，触发故障恢复流程
                             if ("SYSTEM_FAILURE".equals(systemStatus) && 
@@ -222,12 +224,12 @@ public class Communication {
                         }
                         
                         // 心跳间隔，建议低于服务器超时阈值的一半
-                        Thread.sleep(10000); // 10秒发送一次心跳
+                        Thread.sleep(1000); // 1秒发送一次心跳
                     } catch (Exception e) {
                         Log.e(TAG, "心跳循环出错: " + e.getMessage());
                         // 心跳发送失败，短暂等待后重试
                         try {
-                            Thread.sleep(5000);
+                            Thread.sleep(500);
                         } catch (InterruptedException ie) {
                             // 忽略中断异常
                         }
@@ -261,11 +263,11 @@ public class Communication {
      * 处理系统故障
      * 当检测到系统故障时，此方法将被调用进行恢复
      * 
-     * 主要恢复步骤：
+     * 优化的恢复步骤：
      * 1. 标记设备状态为"Recovering"
      * 2. 触发负载重平衡，更新任务分配
      * 3. 清理现有连接并重新建立通信
-     * 4. 恢复中断的推理过程
+     * 4. 更新Socket配置，而不中断推理线程
      * 5. 将状态恢复为"Running"
      * 
      * 注意：此方法由Client.communicationOpenClose调用，不再直接处理通信
@@ -279,15 +281,15 @@ public class Communication {
         }
         
         Log.w(TAG, "System failure handling initiated");
-        param.status = "Recovering"; // 更改为恢复中状态，区别于完全故障
-        Log.d(TAG, "param status: " +  param.status);
+        param.status = "Recovering"; // 更改为恢复中状态
         
         try {
-            // 注意：此方法不再直接处理通信逻辑，所有的通信现在应该在Client.communicationOpenClose中处理
-            // 它只包含恢复逻辑，以便在接收到所需数据后执行
-            
             // 设置LoadBalance的reSampleId触发重载平衡
             Communication.loadBalance.setReSampleId(sampleId);
+            
+            // 保存当前Socket队列的大小，用于恢复后验证
+            int socketPairsCount = allSockets.size();
+            Log.d(TAG, "当前Socket对数量: " + socketPairsCount);
             
             // 清理现有Socket连接
             cleanExistingConnections();
@@ -296,26 +298,33 @@ public class Communication {
             loadBalance.ModifySession();
             loadBalance.reLoadBalance();
             
-            // 重新创建Socket连接
+            // 重新创建Socket连接，直接创建所有需要的Socket
             Log.w(TAG, "重新创建Socket连接");
             updateSockets(param.corePoolSize);
-            Log.d(TAG, "Device connections re-established");
+            
+            // 检查Socket数量是否足够，如果不足，直接创建缺少的数量
+            if (allSockets.size() < socketPairsCount) {
+                int missingPairs = socketPairsCount - allSockets.size();
+                Log.w(TAG, "Socket连接数量不足，需补充" + missingPairs + "对");
+                // 直接创建剩余所需数量的Socket对
+                updateSockets(missingPairs);
+            }
+            
+            Log.d(TAG, "Device connections re-established, socket pairs count: " + allSockets.size());
             
             // 重置重载标志
             Communication.loadBalance.setReSampleId(-1);
             Communication.LB_Pause.setConditionFalse();
             
             // 恢复状态
-            param.status = "Running";
-            Log.d(TAG, "System recovery completed, status restored to: " + param.status);
+            param.status = "WaitingStart";
+            Log.w(TAG, "恢复完成，准备重新开始，设备状态：" + param.status);
             
-            // 重新启动推理过程
-            resumeInference();
+            // 注意：我们不再调用resumeInference()方法，因为我们不中断推理线程
+            // 当前推理线程会在下一次oneStep迭代时使用新的Socket连接
         } catch (Exception e) {
             Log.e(TAG, "Error during system failure recovery: " + e.getMessage());
-            e.printStackTrace();
-            // 恢复过程出错，设置为故障状态
-            param.status = "Failure";
+            param.status = "Failure"; // 恢复失败，标记为故障状态
         }
     }
     
@@ -335,96 +344,13 @@ public class Communication {
                         socket.setLinger(0);//确保快速释放端口
                         socket.close();
                     }
-
+                   
                 }
             }
 
             Log.d(TAG, "Existing connections cleaned up");
         } catch (Exception e) {
             Log.e(TAG, "Error cleaning existing connections: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 恢复推理过程
-     *
-     * 故障恢复的最后阶段，重启被中断的推理过程
-     * 主要步骤：
-     * 1. 确认当前推理进度
-     * 2. 恢复保存的输入/中间状态数据
-     * 3. 对于头节点，恢复已经生成的部分结果
-     * 4. 通知服务器已准备好继续推理
-     */
-    void resumeInference() {
-        try {
-            Log.d(TAG, "恢复推理过程");
-
-            // 检查当前的状态和进度
-            if (sampleId < param.numSample) {
-                // 还有未完成的样本，重新开始从当前样本推理
-                Log.d(TAG, "Resuming inference from sample " + sampleId);
-
-                // 清理可能的中间状态，但保留输入数据
-                Map<Integer, ArrayList<Integer>> savedInputIds = null;
-                if (cfg.isHeader()) {
-                    // 头节点需要保存输入数据以便恢复
-                    savedInputIds = new HashMap<>(InputIds);
-                }
-
-                OutputData.clear();
-                ResidualDataFromDevice.clear();
-                ResidualDataToDevice.clear();
-
-                if (cfg.isHeader()) {
-                    // 恢复头节点的输入数据
-                    if (savedInputIds != null) {
-                        // 仅保留已完成处理的样本的数据
-                        for (int i = 0; i < sampleId; i++) {
-                            if (savedInputIds.containsKey(i)) {
-                                InputIds.put(i, savedInputIds.get(i));
-                                Log.d(TAG, "Restored input data for sample " + i);
-                            }
-                        }
-                    }
-
-                    // 如果当前正在处理的样本有部分输入数据，也需要恢复
-                    if (savedInputIds != null && savedInputIds.containsKey(sampleId-1)) {
-                        InputIds.put(sampleId-1, savedInputIds.get(sampleId-1));
-                        Log.d(TAG, "Restored in-progress sample data for sample " + (sampleId-1));
-
-                        // 记录恢复的数据大小，用于调试
-                        Log.d(TAG, "Restored data size: " + InputIds.get(sampleId-1).size() + " tokens");
-
-                        // 检查是否有足够的输入标记以继续处理
-                        if (InputIds.get(sampleId-1).size() > 0) {
-                            // 获取最后生成的token，可用于显示
-                            int lastToken = InputIds.get(sampleId-1).get(InputIds.get(sampleId-1).size() - 1);
-                            String lastTokenText = decodeID(new int[]{lastToken}, tokenizer);
-                            Log.d(TAG, "Last generated token before failure: " + lastTokenText);
-
-                            // 更新UI显示，通知用户恢复了之前的生成
-                            ArrayList<Integer> decodeList = InputIds.get(sampleId-1);
-                            String decodedString = decodeID(Utils.convertArrayListToIntArray(
-                                    Objects.requireNonNull(decodeList)), tokenizer);
-                            System.out.println("Recovered generated text: " + decodedString);
-                            DataRepository.INSTANCE.updateDecodingString(decodedString);
-                        }
-                    }
-
-                    Log.d(TAG, "Header node input data resynchronized");
-                }
-
-                // 通知服务器准备好继续推理
-                rootSocket.sendMore("RESUME_INFERENCE");
-                rootSocket.send(String.valueOf(sampleId));
-
-                Log.d(TAG, "Inference process resumed");
-            } else {
-                Log.d(TAG, "No more samples to process, inference already completed");
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error resuming inference: " + e.getMessage());
-            e.printStackTrace();
         }
     }
 
@@ -435,6 +361,7 @@ public class Communication {
             try {
                 this.prepare(param); // 运行Communication类的prepare方法
             } catch (Exception e) { // 如果 prepare() 方法抛出异常，抛出一个运行时异常
+                Log.e(TAG, "Error: " + e.getMessage());
                 throw new RuntimeException(e);
             }
         });
@@ -461,6 +388,10 @@ public class Communication {
         Log.d(TAG, "root IP: " + cfg.root +  " ,root port: " + cfg.rootPort);
 
         if (param.equals("active")){
+
+                Config.port=10000;
+                Log.e(TAG,"Port:"+Config.port);
+
             commuSocket  = beClient.establish_connection(context, SocketType.DEALER, 23457,cfg.root); // 与服务器建立连接
 
             beClient.communicationOpenCloseActive(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
@@ -779,6 +710,8 @@ public class Communication {
         private Map<Integer, Socket> clientSocket;
         private final int sample_id;
         private final Semaphore latch;
+        // 添加状态跟踪变量
+        private String prevStatus = ""; // 用于跟踪上一个状态
 
         // 构造函数，初始化样本 ID 和信号量，并从 allSockets 队列中获取服务器端和客户端的套接字映射
         public multiSteps(int sample_id, Semaphore latch) {
@@ -800,14 +733,19 @@ public class Communication {
         @Override
         public void run() {
             DataRepository.INSTANCE.updateSampleId(this.sample_id); // 更新数据仓库中的当前批次
-
+            System.out.println("SampleID: " + sample_id);
             if (param.max_length < 0) {
                 System.out.println("ERROR: Set up max_length");
             } else if (param.max_length == 0) { // 当max_length为0时代表分类任务
                 System.out.println("SampleID: " + sample_id);
                 int receivedId = 0;
                 try {
-                    receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run();
+                    // 在执行OneStep前检查恢复状态
+                    if (!"Recovery".equals(param.status) && !"Recovering".equals(param.status) && !"Failure".equals(param.status)) {
+                        receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run();
+                    } else {
+                        Log.d(TAG, "系统处于恢复或故障状态，跳过推理");
+                    }
                 } catch (InterruptedException | JSONException e) {
                     throw new RuntimeException(e);
                 }
@@ -822,13 +760,60 @@ public class Communication {
                 final int REPEAT_SIZE = 4;
 
                 // 对每个token进行处理
-                for (int m = 0; m < param.max_length; m++) {
+
+                int m = 0;
+                while (m < param.max_length)
+                {
                     long startTime = System.nanoTime();
+                    m+=1;
                     System.out.println("current token:" + m);
-                    try {   // 调用OneStep处理每个Token
+                    try {   
+                        // 定义状态追踪变量（添加到类成员变量中）
+                        
+                        // 更新状态检查逻辑，使用类成员变量prevStatus
+                        // 检查系统状态是否从恢复状态转变为运行状态
+                        Log.e(TAG,"系统当前状态:"+param.status+ "系统前状态:"+prevStatus);
+                        if ("ResumeStart".equals(param.status) && "Running".equals(prevStatus)) {
+                            Log.d(TAG, "系统已从恢复状态转为运行状态，重新获取Socket");
+                            
+                            try {
+                                // 将当前Socket放回队列，以便其他线程在恢复完成后能使用
+                                allSockets.put(new ArrayList<Map<Integer, Socket>>(){{
+                                    add(clientSocket);
+                                    add(serverSocket);
+                                }});
+                                
+                                // 短暂等待，确保恢复过程完成
+                                Thread.sleep(500);
+                                
+                                // 重新从队列获取Socket（恢复后的新Socket）
+                                ArrayList<Map<Integer, Socket>> refreshedSockets = allSockets.take();
+                                this.clientSocket = refreshedSockets.get(0);
+                                this.serverSocket = refreshedSockets.get(1);
+                                
+                                Log.d(TAG, "Socket已更新，继续推理");
+                                param.status = "Running";
+                            } catch (InterruptedException e) {
+                                Log.e(TAG, "更新Socket时发生中断: " + e.getMessage());
+                            }
+                        }
+                        
+                        // 如果系统处于恢复或故障状态，跳过当前token处理，等待状态恢复
+                        if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
+                            Log.d(TAG, "系统正在恢复或故障状态中，跳过当前token处理");
+                            Thread.sleep(100); // 短暂休眠，避免CPU空转
+                            m--; // 退回一步，以便恢复后重新处理当前token
+                            continue; // 跳过当前循环
+                        }
+                        
+                        // 更新prevStatus，用于下一次循环检查状态变化
+                        if (!prevStatus.equals(param.status)) {
+                            prevStatus = param.status;
+
+                        }
+                        
                         int flag = 1;
-//                        receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run();
-                        // 顺序生成每一个token
+                        // 调用OneStep处理当前token，使用可能已更新的Socket
                         flag = new OneStep(this.sample_id, serverSocket, clientSocket).run();
 
                         if (cfg.isHeader()) {
@@ -881,12 +866,23 @@ public class Communication {
                             // 如果触发停止条件，终止生成
                             if (stopGeneration) {
                                 System.out.println("重复生成，终止解码");
-                                break;
+ 
+                                
+                                    Log.d(TAG, "重复生成，终止解码");
+                                    Thread.sleep(100); // 短暂休眠，避免CPU空转
+                                    m--; // 退回一步，以便恢复后重新处理当前token
+                                    continue; // 跳过当前循环
+                                 
+                              
                             }
                         }
 
                         if(flag == 0)
+                        {
+                            Log.e(TAG,"flag = 0 了");
                             break;
+                        }
+
                     } catch (InterruptedException | JSONException e) {
                         throw new RuntimeException(e);
                     }
@@ -949,7 +945,7 @@ public class Communication {
                 System.out.println("Start to be a Client");
 
                 // 检查系统状态，如果正在恢复则不等待结果
-                if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+                if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                     Log.d(TAG, "系统正在故障恢复中，跳过客户端数据接收");
                     return receivedId;
                 }
@@ -960,10 +956,6 @@ public class Communication {
                     return receivedId;
                 }
 
-                // 设置临时接收超时，防止故障时永久阻塞
-                int originalTimeout = serverSocket.getReceiveTimeOut();
-//                serverSocket.setReceiveTimeOut(5000); // 5秒超时
-                
                 try {
                     serverSocket.send("Request Data");  // 向前驱节点发送数据请求
                     
@@ -971,8 +963,6 @@ public class Communication {
                     byte[] idData = serverSocket.recv(0);
                     if (idData == null) {
                         Log.w(TAG, "等待前驱节点响应超时，可能发生故障");
-                        // 恢复原始超时设置
-                        serverSocket.setReceiveTimeOut(originalTimeout);
                         return receivedId;
                     }
                     receivedId = Utils.convertByteArrayToInt(idData);
@@ -990,8 +980,6 @@ public class Communication {
                     byte[] msgFrom = serverSocket.recv(0);
                     if (msgFrom == null) {
                         Log.w(TAG, "等待前驱节点数据超时，可能发生故障");
-                        // 恢复原始超时设置
-                        serverSocket.setReceiveTimeOut(originalTimeout);
                         return receivedId;
                     }
                     
@@ -999,21 +987,14 @@ public class Communication {
                     InputData.put(receivedId, msgFrom);
                     System.out.println("Received Data");
                     
-                    // 使用带超时的join等待残差数据接收线程完成
-                    // 设置较短的超时时间以防止长时间阻塞
-                    workerThread.join(3000);
-                    
-                    // 如果线程仍在运行，不强制中断它，但记录日志
-                    if (workerThread.isAlive()) {
-                        Log.w(TAG, "残差数据接收线程未能在规定时间内完成");
-                    } else {
-                        System.out.println("Received ResData");
-                    }
-                } finally {
-                    // 确保在所有情况下恢复原始超时设置
-                    serverSocket.setReceiveTimeOut(originalTimeout);
+                    // 等待残差数据接收线程完成
+                    workerThread.join();
+                    System.out.println("Received ResData");
+                } catch (org.zeromq.ZMQException e) {
+                    // 处理ZMQ异常，通常是由于故障恢复期间中断Socket操作导致
+                    Log.w(TAG, "Socket操作被中断，可能是故障恢复过程引起: " + e.getMessage());
+                    return receivedId;
                 }
-
             } else {
                 // 作为头节点时，从本地加载数据而不是从其他节点接收
                 if (logits.get(receivedId) == null) {
@@ -1038,7 +1019,7 @@ public class Communication {
             }
 
             // 检查系统状态，如果正在恢复则不等待请求
-            if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+            if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                 Log.d(TAG, "系统正在故障恢复中，跳过服务器数据发送");
                 return;
             }
@@ -1050,10 +1031,6 @@ public class Communication {
             }
 
             System.out.println("Start to be a Server");
-            
-            // 设置临时接收超时，防止故障时永久阻塞
-            int originalTimeout = clientSocket.getReceiveTimeOut();
-            clientSocket.setReceiveTimeOut(5000); // 5秒超时
             
             try {
                 // 接收来自后继节点的请求ID和内容
@@ -1105,21 +1082,16 @@ public class Communication {
                             Log.w(TAG, "数据发送失败，可能是接收方已断开连接");
                         }
                         
-                        // 使用带超时的join等待残差数据发送线程完成
-                        workerThread.join(3000);
-                        
-                        // 如果线程仍在运行，不强制中断它，但记录日志
-                        if (workerThread.isAlive()) {
-                            Log.w(TAG, "残差数据发送线程未能在规定时间内完成");
-                        }
+                        // 等待残差数据发送线程完成
+                        workerThread.join();
                     } else {
                         // 数据不存在时输出警告
                         System.out.println(receivedId + " is not in the OutputData");
                     }
                 }
-            } finally {
-                // 确保在所有情况下恢复原始超时设置
-                clientSocket.setReceiveTimeOut(originalTimeout);
+            } catch (org.zeromq.ZMQException e) {
+                // 处理ZMQ异常，通常是由于故障恢复期间中断Socket操作导致
+                Log.w(TAG, "Socket操作被中断，可能是故障恢复过程引起: " + e.getMessage());
             }
         }
 
@@ -1139,7 +1111,7 @@ public class Communication {
                     System.out.println("Start to obtain result from tailer");
                     
                     // 检查系统状态，如果正在恢复则不等待结果
-                    if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+                    if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                         Log.d(TAG, "系统正在故障恢复中，跳过等待尾节点结果");
                         return flag;
                     }
@@ -1155,7 +1127,7 @@ public class Communication {
                     
                     // 设置临时接收超时，防止故障时永久阻塞
                     int originalTimeout = serverSocket.getReceiveTimeOut();
-//                    serverSocket.setReceiveTimeOut(5000); // 5秒超时
+                    serverSocket.setReceiveTimeOut(5000); // 5秒超时
                     
                     // 接收样本ID
                     byte[] idData = serverSocket.recv(0);
@@ -1203,7 +1175,7 @@ public class Communication {
                     Log.w(TAG, "Socket操作被中断，可能是故障恢复过程引起: " + e.getMessage());
                     
                     // 检查是否系统正在恢复
-                    if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+                    if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                         Log.d(TAG, "系统正在执行故障恢复，Socket中断是预期行为");
                     } else {
                         Log.e(TAG, "Socket通信意外中断", e);
@@ -1231,7 +1203,7 @@ public class Communication {
             
             try {
                 // 检查系统状态和推理是否被中断
-                if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+                if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                     Log.d(TAG, "系统正在故障恢复中，跳过推理步骤");
                     return flag;
                 }
@@ -1245,7 +1217,7 @@ public class Communication {
                 long startTime = System.nanoTime();  // 记录开始时间
                 try {
                     receivedId = procssingAsClient(receivedId);
-                    System.out.println("AsClient Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
+                    System.out.println(" 第一步：作为客户端接收数据: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (org.zeromq.ZMQException e) {
                     // 处理Socket通信异常
                     Log.w(TAG, "客户端接收数据时Socket操作被中断: " + e.getMessage());
@@ -1262,7 +1234,7 @@ public class Communication {
                 startTime = System.nanoTime();
                 try {
                     inferenceProcedure(receivedId);  // 调用推理处理方法
-                    System.out.println("Inference Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
+                    System.out.println("第二步：执行推理计算: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (Exception e) {
                     // 处理推理计算异常
                     Log.e(TAG, "推理计算过程发生异常: " + e.getMessage(), e);
@@ -1279,7 +1251,7 @@ public class Communication {
                 startTime = System.nanoTime();
                 try {
                     processAsServer(receivedId);
-                    System.out.println("AsServer Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
+                    System.out.println("第三步：作为服务器发送数据: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (org.zeromq.ZMQException e) {
                     // 处理Socket通信异常
                     Log.w(TAG, "服务器发送数据时Socket操作被中断: " + e.getMessage());
@@ -1296,7 +1268,7 @@ public class Communication {
                 startTime = System.nanoTime();
                 try {
                     flag = obtainResultsFromTailer(receivedId);  // 获取处理状态标志
-                    System.out.println("ObtainResult Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
+                    System.out.println("第四步：获取尾节点结果: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (Exception e) {
                     // 处理结果获取异常
                     Log.w(TAG, "获取尾节点结果时发生异常: " + e.getMessage());
@@ -1318,7 +1290,7 @@ public class Communication {
          * @return true如果系统处于故障恢复状态或推理已停止，false表示正常运行
          */
         private boolean checkSystemStatus() {
-            if ("Recovery".equals(param.status) || "Recovering".equals(param.status)) {
+            if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                 Log.d(TAG, "系统当前处于故障恢复状态，推理步骤中断");
                 return true;
             }
@@ -1342,7 +1314,13 @@ public class Communication {
     public void updateSockets(int corePoolSize) throws InterruptedException {
         Log.d(TAG, "开始执行updateSockets，核心池大小: " + corePoolSize);
         Log.d(TAG, "发送设备集合: " + sendDeviceIndex + ", 接收设备集合: " + receiveDeviceIndex);
-        
+        if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status)|| "WaitingStart".equals(param.status) ) {
+            Config.port=10000;
+            Log.e(TAG,"updateSockets Port:"+Config.port);
+        }
+        else {
+            Log.e(TAG,"updateSockets Port:"+Config.port);
+        }
         int j = cfg.ipGraph.length;  // 获取IP图的长度（设备总数）
         System.out.println("Graph length: " + j);
         Log.d(TAG, "IP图内容: " + Arrays.toString(cfg.ipGraph) + ", 当前设备ID: " + cfg.deviceId);
@@ -1355,24 +1333,27 @@ public class Communication {
             // 创建发送Socket映射
             Log.d(TAG, "开始创建发送Socket映射, 设备ID: " + cfg.deviceId);
             Map<Integer, Socket> SendSocket = new HashMap<>();
-            for (Integer idx : sendDeviceIndex) {  // 遍历需要发送数据的设备索引
-                try {
-                    int portNum = Config.port + j*i + (idx-cfg.deviceId);
-                    Log.d(TAG, "尝试创建发送Socket至设备: " + idx + ", 端口: " + portNum);
-                    
-                    // 创建路由型Socket（多对多通信）
-                    Socket temp = beServer.establish_connection(context, SocketType.ROUTER, 
-                            portNum);  // 计算唯一端口号
-                    Log.d(TAG, "创建路由型Socket（多对多通信）成功，端口: " + portNum);
-                    // 设置Socket标识
-                    temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + idx + "." + 
-                            portNum).getBytes());
-                    Log.d(TAG, "设置Socket标识成功");
-                    // 将Socket添加到映射中
-                    SendSocket.put(idx, temp);
-                    Log.d(TAG, "成功创建发送Socket至设备: " + idx);
-                } catch (Exception e) {
-                    Log.e(TAG, "创建发送Socket至设备: " + idx + " 失败: " + e.getMessage(), e);
+
+            for (Integer idx : sendDeviceIndex) {
+
+                int portNum = Config.port + j * i + (idx - cfg.deviceId);
+                int maxRetries = 10;
+                for (int retry = 0; retry < maxRetries; retry++) {
+                    try {
+                        Log.d(TAG, "尝试创建发送Socket至设备: " + idx + ", 端口: " + portNum + ", 重试: " + retry);
+                        Socket temp = beServer.establish_connection(context, SocketType.ROUTER, portNum);
+                        temp.setIdentity(("ROUTER Send From " + cfg.deviceId + " to " + idx + "." + portNum).getBytes());
+                        SendSocket.put(idx, temp);
+                        Log.d(TAG, "成功创建发送Socket至设备: " + idx);
+                        break;
+                    } catch (ZMQException e) {
+                        if (e.getErrorCode() == ZMQ.Error.EADDRINUSE.getCode() && retry < maxRetries - 1) {
+                            Log.w(TAG, "端口 " + portNum + " 占用，重试...");
+                            Thread.sleep(200); // 等待 100ms
+                        } else {
+                            throw new RuntimeException("创建发送Socket至设备: " + idx + " 失败", e);
+                        }
+                    }
                 }
             }
 
@@ -1697,11 +1678,7 @@ public class Communication {
     public native Object runInferenceWorkerResidual(long session,  byte[] sequential_input, ArrayList<byte[]> residual_input, int[] to_send_seq_indices, int[][] to_send_res_indices);
     public native byte[] runInferenceWorkerResidualLast(long session, byte[] sequential_input, ArrayList<byte[]>  residual_input);
 
-    public native byte[] runInferenceWorkerResidualLastGeneration(long session,
-                                                                  byte[] sequential_input,
-                                                                  ArrayList<byte[]>  residual_input,
-                                                                  int k,
-                                                                  float init_temp);
+    public native byte[] runInferenceWorkerResidualLastGeneration(long session, byte[] sequential_input, ArrayList<byte[]>  residual_input, int k, float init_temp);
 
     public native byte[] runInferenceWorkerResidualLastClassification(long session, byte[] sequential_input, ArrayList<byte[]>  residual_input);
 
