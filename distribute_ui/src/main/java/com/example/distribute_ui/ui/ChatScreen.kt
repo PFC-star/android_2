@@ -104,13 +104,49 @@ fun ChatScreen(
 
     val num_device = viewModel.num_device
 
+    // 添加模拟用户输入的状态
+    var isSimulationRunning by remember { mutableStateOf(false) }
+    val testPrompts = remember {
+        listOf(
+            "Hello, how are you?",
+            "What's the weather like today?",
+            "Tell me a joke",
+            "What's your favorite color?",
+            "How does a computer work?"
+        )
+    }
+    var currentPromptIndex by remember { mutableStateOf(0) }
+
     Column (modifier = Modifier.fillMaxSize()){
         Box(modifier = Modifier
             .fillMaxWidth()
             .weight(0.15f)
             .background(Color.White),
             contentAlignment = Alignment.Center){
-            ModelSelection(index, num_device)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ModelSelection(index, num_device)
+                // 添加模拟按钮
+                androidx.compose.material3.Button(
+                    onClick = {
+                        isSimulationRunning = !isSimulationRunning
+                        if (isSimulationRunning) {
+                            currentPromptIndex = 0
+                        }
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = if (isSimulationRunning) Color.Red else Color.Green
+                    )
+                ) {
+                    Text(
+                        text = if (isSimulationRunning) "Stop Simulation" else "Start Simulation",
+                        color = Color.White
+                    )
+                }
+            }
         }
         Box(modifier = Modifier
             .fillMaxWidth()
@@ -138,6 +174,26 @@ fun ChatScreen(
                     }
                 },
             )
+        }
+    }
+
+    // 添加模拟逻辑
+    LaunchedEffect(isSimulationRunning) {
+        if (isSimulationRunning) {
+            while (isSimulationRunning && currentPromptIndex < testPrompts.size) {
+                // 发送消息
+                val content = testPrompts[currentPromptIndex]
+                viewModel.addChatHistory(Messaging(authorMe, content, getCurrentFormattedTime()))
+                EventBus.getDefault().post(Events.messageSentEvent(true, content))
+                
+                // 等待10秒
+                kotlinx.coroutines.delay(10000)
+                
+                // 更新索引
+                currentPromptIndex++
+            }
+            // 模拟结束后重置状态
+            isSimulationRunning = false
         }
     }
 }

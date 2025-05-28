@@ -773,9 +773,12 @@ public class Communication {
                         // 更新状态检查逻辑，使用类成员变量prevStatus
                         // 检查系统状态是否从恢复状态转变为运行状态
                         Log.e(TAG,"系统当前状态:"+param.status+ "系统前状态:"+prevStatus);
-                        if ("ResumeStart".equals(param.status) && "Running".equals(prevStatus)) {
+                        if(("ResumeStart".equals(param.status) && "Running".equals(prevStatus))  || ( m==1) )  {
                             Log.d(TAG, "系统已从恢复状态转为运行状态，重新获取Socket");
-                            
+                            if (m==0){
+                                Log.d(TAG, "m======0");
+                            }
+
                             try {
                                 // 将当前Socket放回队列，以便其他线程在恢复完成后能使用
                                 allSockets.put(new ArrayList<Map<Integer, Socket>>(){{
@@ -865,13 +868,13 @@ public class Communication {
 
                             // 如果触发停止条件，终止生成
                             if (stopGeneration) {
-                                System.out.println("重复生成，终止解码");
+//                                System.out.println("重复生成，终止解码");
  
                                 
                                     Log.d(TAG, "重复生成，终止解码");
                                     Thread.sleep(100); // 短暂休眠，避免CPU空转
-                                    m--; // 退回一步，以便恢复后重新处理当前token
-                                    continue; // 跳过当前循环
+//                                    m--; // 退回一步，以便恢复后重新处理当前token
+//                                    continue; // 跳过当前循环
                                  
                               
                             }
@@ -880,7 +883,7 @@ public class Communication {
                         if(flag == 0)
                         {
                             Log.e(TAG,"flag = 0 了");
-                            break;
+//                            break;
                         }
 
                     } catch (InterruptedException | JSONException e) {
@@ -1162,6 +1165,7 @@ public class Communication {
                         // 如果解码ID为2(通常是结束标记)，设置完成标志
                         if(decode_id == 2){
                             flag = 0;
+                            Log.e(TAG,"如果解码ID为2(通常是结束标记)，设置完成标志 flag = 0 了");
                         }
                         
                         // 将解码ID添加到输入序列

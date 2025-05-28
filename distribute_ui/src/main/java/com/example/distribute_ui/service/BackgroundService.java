@@ -52,6 +52,18 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
     private String messageContent = "";             // 存储用户输入的消息内容
 
+    private static final int SIMULATION_INTERVAL = 10000; // 10秒间隔
+    private boolean isSimulationRunning = false;
+    private Thread simulationThread;
+    private int simulationCount = 0;
+    private final String[] testPrompts = {
+        "Hello, how are you?",
+        "What's the weather like today?",
+        "Tell me a joke",
+        "What's your favorite color?",
+        "How does a computer work?"
+    };
+
     /**
      * 监听RunningStatusEvent事件
      * 当Communication类初始化完成后，会发送此事件
@@ -142,6 +154,61 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     }
 
     /**
+     * 启动模拟用户输入
+     */
+    public void startSimulation() {
+        if (isSimulationRunning) {
+            return;
+        }
+        
+        isSimulationRunning = true;
+        simulationCount = 0;
+        
+        simulationThread = new Thread(() -> {
+            while (isSimulationRunning && simulationCount < testPrompts.length) {
+                try {
+                    // 发送消息事件
+                    String currentPrompt = testPrompts[simulationCount];
+                    Log.d(TAG, "Simulating user input: " + currentPrompt);
+                    
+                    // 发送消息到UI
+                    EventBus.getDefault().post(new Events.messageSentEvent(true, currentPrompt));
+                    
+                    // 更新消息状态
+                    messageStatus = true;
+                    messageContent = currentPrompt;
+                    
+                    // 等待推理完成
+                    Thread.sleep(SIMULATION_INTERVAL);
+                    
+                    // 重置消息状态，准备下一轮
+                    messageStatus = false;
+                    simulationCount++;
+                    
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "Simulation interrupted: " + e.getMessage());
+                    break;
+                }
+            }
+            
+            isSimulationRunning = false;
+            Log.d(TAG, "Simulation completed");
+        });
+        
+        simulationThread.start();
+    }
+
+    /**
+     * 停止模拟用户输入
+     */
+    public void stopSimulation() {
+        isSimulationRunning = false;
+        if (simulationThread != null) {
+            simulationThread.interrupt();
+        }
+    }
+
+    /**
      * 服务启动时执行的回调方法
      * 负责初始化推理环境并启动推理过程
      * 
@@ -220,7 +287,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             // MainActivity中的receiver在接收到该广播后将启动MonitorService并附加role信息
 //            if (need_monitor) {
 //                Intent broadcastIntent = new Intent();
-//                broadcastIntent.setAction("START_MONITOR"); // 设置广播的"action“
+//                broadcastIntent.setAction("START_MONITOR"); // 设置广播的"action"
 //                LocalBroadcastManager.getInstance(this).sendBroadcast(broadcastIntent);
 //                sendBroadcast(broadcastIntent);
 //                Log.d(TAG, "broadcast sent by backgroundService");
@@ -373,6 +440,10 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 results = com.timeUsage;   // 保存时间统计结果
 
                 Log.d(TAG, "Results Computation Time: " + (System.nanoTime() - startTime) / 1000000000.0);
+
+                // 启动模拟
+                startSimulation();
+                
                 return null;
             }
 
@@ -436,6 +507,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopSimulation();
         isServiceRunning = false;
         EventBus.getDefault().unregister(this);  // 取消事件总线监听器
     }
