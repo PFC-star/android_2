@@ -125,8 +125,9 @@ fun ChatScreen(
     var userInputText by rememberSaveable(stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) { 
         mutableStateOf(androidx.compose.ui.text.input.TextFieldValue()) 
     }
-    var isFirstInput by remember { mutableStateOf(true) }
+    var hasStarted by remember { mutableStateOf(false) }
     var lastResponseTime by remember { mutableStateOf(0L) }
+    var nextPrompt by remember { mutableStateOf("") }
 
     // 自动输入逻辑
     LaunchedEffect(sampleId, uiState.value.chatHistory.size) {
@@ -134,10 +135,15 @@ fun ChatScreen(
         val timeSinceLastMessage = currentTime - lastMessageTime
         val timeSinceLastResponse = currentTime - lastResponseTime
         
+        Log.d(TAG, "[UIAutoInput] 状态检查: isWaitingForResponse=$isWaitingForResponse, " +
+                  "timeSinceLastResponse=$timeSinceLastResponse, chatHistorySize=${uiState.value.chatHistory.size}, " +
+                  "hasStarted=$hasStarted")
+        
         // 检查是否有新消息
         if (isWaitingForResponse && uiState.value.chatHistory.size > 0) {
             val lastMessage = uiState.value.chatHistory.last()
             if (lastMessage.author != authorMe) {
+                // 收到AI响应，重置状态
                 isWaitingForResponse = false
                 lastResponseTime = currentTime
                 // 清空输入框
@@ -147,29 +153,29 @@ fun ChatScreen(
         }
         
         // 检查是否需要自动输入
-        if ((isFirstInput || (!isWaitingForResponse && timeSinceLastResponse >= 10000)) && 
-            uiState.value.chatHistory.count { it.author == authorMe } < predefinedPrompts.size) {
-            
-            // 自动输入
-            val autoMsg = predefinedPrompts[currentPromptIndex]
-            Log.d(TAG, "[UIAutoInput] 触发自动输入: $autoMsg, sampleId=$sampleId, timeSinceLastResponse=$timeSinceLastResponse")
-            
-            // 更新输入框文本
-            userInputText = androidx.compose.ui.text.input.TextFieldValue(autoMsg)
+        val shouldAutoInput = (!hasStarted || (!isWaitingForResponse && timeSinceLastResponse >= 10000)) && 
+                            uiState.value.chatHistory.count { it.author == authorMe } < predefinedPrompts.size
+        
+        Log.d(TAG, "[UIAutoInput] 自动输入检查: shouldAutoInput=$shouldAutoInput")
+        
+        if (shouldAutoInput) {
+            // 准备下一轮输入
+            nextPrompt = predefinedPrompts[currentPromptIndex]
             currentPromptIndex = (currentPromptIndex + 1) % predefinedPrompts.size
             
             // 延迟一小段时间模拟用户思考
             kotlinx.coroutines.delay(500)
             
-            // 触发发送
-            viewModel.addChatHistory(Messaging(authorMe, autoMsg, getCurrentFormattedTime()))
-            EventBus.getDefault().post(Events.messageSentEvent(true, autoMsg))
-            Log.d(TAG, "[UIAutoInput] 自动输入已发送: $autoMsg")
+            // 更新输入框文本并发送
+            userInputText = androidx.compose.ui.text.input.TextFieldValue(nextPrompt)
+            viewModel.addChatHistory(Messaging(authorMe, nextPrompt, getCurrentFormattedTime()))
+            EventBus.getDefault().post(Events.messageSentEvent(true, nextPrompt))
+            Log.d(TAG, "[UIAutoInput] 自动输入已发送: $nextPrompt")
             
             // 更新状态
             lastMessageTime = currentTime
             isWaitingForResponse = true
-            isFirstInput = false
+            hasStarted = true
         }
     }
 
