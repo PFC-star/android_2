@@ -53,19 +53,24 @@ import com.example.distribute_ui.data.Dim
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun UserInput(
+    textState: TextFieldValue = TextFieldValue(),
+    setTextState: (TextFieldValue) -> Unit = {},
     onClicked: () -> Unit,
     onMessageSent: (String) -> Unit,
     resetScroll: () -> Unit = {},
 ) {
 
-    var textState by rememberSaveable(stateSaver = TextFieldValue.Saver) {  // 记录文本框的内容
+    var internalTextState by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue())
     }
     val keyboardController = LocalSoftwareKeyboardController.current    // 获取当前的键盘控制器实例，用于显示或隐藏软键盘
 
+    val displayTextState = if (setTextState != {}) textState else internalTextState
+    val updateTextState: (TextFieldValue) -> Unit = if (setTextState != {}) setTextState else { value -> internalTextState = value }
+
     TextField(
-        value = textState,
-        onValueChange = { textState = it },
+        value = displayTextState,
+        onValueChange = { updateTextState(it) },
         placeholder = { Text(text = "Message", fontSize = 16.sp) },
         leadingIcon = {
             Icon(
@@ -80,12 +85,12 @@ fun UserInput(
                 contentDescription = "",
                 tint = Color.Black,
                 modifier = Modifier.clickable{
-                    if (textState.text.isNotBlank()) {
+                    if (displayTextState.text.isNotBlank()) {
                         keyboardController?.hide()
 
-                        onMessageSent(textState.text)
+                        onMessageSent(displayTextState.text)
                         onClicked()
-                        textState = TextFieldValue()
+                        updateTextState(TextFieldValue())
                         resetScroll()
                     }
                 }

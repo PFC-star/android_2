@@ -52,18 +52,6 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
     private String messageContent = "";             // 存储用户输入的消息内容
 
-    private static final int SIMULATION_INTERVAL = 10000; // 10秒间隔
-    private boolean isSimulationRunning = false;
-    private Thread simulationThread;
-    private int simulationCount = 0;
-    private final String[] testPrompts = {
-        "Hello, how are you?",
-        "What's the weather like today?",
-        "Tell me a joke",
-        "What's your favorite color?",
-        "How does a computer work?"
-    };
-
     /**
      * 监听RunningStatusEvent事件
      * 当Communication类初始化完成后，会发送此事件
@@ -151,61 +139,6 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private void updateIsDirEmpty(boolean isDirEmpty) {
         // Update the repository with the new value
         DataRepository.INSTANCE.setIsDirEmpty(isDirEmpty);
-    }
-
-    /**
-     * 启动模拟用户输入
-     */
-    public void startSimulation() {
-        if (isSimulationRunning) {
-            return;
-        }
-        
-        isSimulationRunning = true;
-        simulationCount = 0;
-        
-        simulationThread = new Thread(() -> {
-            while (isSimulationRunning && simulationCount < testPrompts.length) {
-                try {
-                    // 发送消息事件
-                    String currentPrompt = testPrompts[simulationCount];
-                    Log.d(TAG, "Simulating user input: " + currentPrompt);
-                    
-                    // 发送消息到UI
-                    EventBus.getDefault().post(new Events.messageSentEvent(true, currentPrompt));
-                    
-                    // 更新消息状态
-                    messageStatus = true;
-                    messageContent = currentPrompt;
-                    
-                    // 等待推理完成
-                    Thread.sleep(SIMULATION_INTERVAL);
-                    
-                    // 重置消息状态，准备下一轮
-                    messageStatus = false;
-                    simulationCount++;
-                    
-                } catch (InterruptedException e) {
-                    Log.e(TAG, "Simulation interrupted: " + e.getMessage());
-                    break;
-                }
-            }
-            
-            isSimulationRunning = false;
-            Log.d(TAG, "Simulation completed");
-        });
-        
-        simulationThread.start();
-    }
-
-    /**
-     * 停止模拟用户输入
-     */
-    public void stopSimulation() {
-        isSimulationRunning = false;
-        if (simulationThread != null) {
-            simulationThread.interrupt();
-        }
     }
 
     /**
@@ -406,8 +339,12 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                     new Thread(() -> {
                         int j = 0;  // 记录当前批次序号
                         String userinput = "";
+                        // 自动输入相关变量
+                        // int autoInputCount = 1;
+                        // boolean autoInputEnabled = true; // 可加开关
                         while (j < com.param.numSample) {           // 共执行numSample(BatchSize)次
-                            if (messageContent.equals(userinput)){  // 检查是否有新的用户输入
+                            // 检查是否有新的用户输入
+                            if (messageContent.equals(userinput)){
                                 try {
                                     Thread.sleep(1000);
                                 } catch (InterruptedException e) {
@@ -416,11 +353,44 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                             } else {
                                 // 收到新消息，处理并添加到输入列表
                                 System.out.println("current numSample:" + j + ", New prompt:" + messageContent);
-//                                messageContent = String.format("User: %s. Response:", messageContent); // 格式化prompt，用指定内容替换占位符
+                                Log.d(TAG, "[AutoInput] 用户输入检测到新消息: " + messageContent);
                                 userinput = messageContent;
                                 test_input.add(userinput);      // 将prompt加入列表中
+                                Log.d(TAG, "[AutoInput] test_input已更新, 当前size: " + test_input.size());
                                 j++;                            // 将当前批次的计数+1
                             }
+
+                            // // 自动输入逻辑
+                            // if (autoInputEnabled && j < com.param.numSample) {
+                            //     // 检查推理线程是否处于等待输入
+                            //     Log.d(TAG, "在autoInputEnabled里");
+                            //     if (com.sampleId >= test_input.size()) {
+                            //         Log.d(TAG, "[AutoInput] 检测到推理线程等待输入, sampleId=" + com.sampleId + ", test_input.size=" + test_input.size());
+                            //         // 生成自动输入内容
+                            //         String autoMsg = "模拟用户输入" + autoInputCount;
+                            //         autoInputCount++;
+                            //         // 发送事件，模拟用户输入
+                            //         messageContent = autoMsg;
+                            //         EventBus.getDefault().post(new Events.messageSentEvent(true, autoMsg));
+                            //         Log.d(TAG, "[AutoInput] 自动输入已发送: " + autoMsg);
+                            //         // 等待推理线程处理本轮输入
+                            //         while (com.sampleId < test_input.size()) {
+                            //             Log.d(TAG, "[AutoInput] 等待推理线程处理自动输入, sampleId=" + com.sampleId + ", test_input.size=" + test_input.size());
+                            //             try {
+                            //                 Thread.sleep(500);
+                            //             } catch (InterruptedException e) {
+                            //                 throw new RuntimeException(e);
+                            //             }
+                            //         }
+                            //         // 推理完成后等待10秒再自动输入下一条
+                            //         Log.d(TAG, "[AutoInput] 推理完成, 等待10秒后准备下一个自动输入");
+                            //         try {
+                            //             Thread.sleep(10000);
+                            //         } catch (InterruptedException e) {
+                            //             throw new RuntimeException(e);
+                            //         }
+                            //     }
+                            // }
                         }
                     }).start();
                 }
@@ -440,10 +410,6 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 results = com.timeUsage;   // 保存时间统计结果
 
                 Log.d(TAG, "Results Computation Time: " + (System.nanoTime() - startTime) / 1000000000.0);
-
-                // 启动模拟
-                startSimulation();
-                
                 return null;
             }
 
@@ -507,7 +473,6 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     @Override
     public void onDestroy() {
         super.onDestroy();
-        stopSimulation();
         isServiceRunning = false;
         EventBus.getDefault().unregister(this);  // 取消事件总线监听器
     }

@@ -615,6 +615,7 @@ public class Communication {
                             Log.d(TAG, "等待输入时收到终止请求，中断推理");
                             break;
                         }
+                        Log.d(TAG, "等待输入");
                         Thread.sleep(1000);
                     }
                     

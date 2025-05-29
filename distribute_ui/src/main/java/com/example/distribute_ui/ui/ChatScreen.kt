@@ -104,18 +104,74 @@ fun ChatScreen(
 
     val num_device = viewModel.num_device
 
-    // 添加模拟用户输入的状态
-    var isSimulationRunning by remember { mutableStateOf(false) }
-    val testPrompts = remember {
-        listOf(
-            "Hello, how are you?",
-            "What's the weather like today?",
-            "Tell me a joke",
-            "What's your favorite color?",
-            "How does a computer work?"
-        )
-    }
+    // 预设的prompt列表
+    val predefinedPrompts = listOf(
+        "What is the capital of France?",
+        "Explain quantum computing in simple terms",
+        "What are the benefits of exercise?",
+        "How does photosynthesis work?",
+        "What is machine learning?",
+        "Explain the theory of relativity",
+        "What causes climate change?",
+        "How do vaccines work?",
+        "What is blockchain technology?",
+        "Explain the water cycle"
+    )
+
+    // 自动输入相关状态
     var currentPromptIndex by remember { mutableStateOf(0) }
+    var lastMessageTime by remember { mutableStateOf(System.currentTimeMillis()) }
+    var isWaitingForResponse by remember { mutableStateOf(false) }
+    var userInputText by rememberSaveable(stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) { 
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue()) 
+    }
+    var isFirstInput by remember { mutableStateOf(true) }
+    var lastResponseTime by remember { mutableStateOf(0L) }
+
+    // 自动输入逻辑
+    LaunchedEffect(sampleId, uiState.value.chatHistory.size) {
+        val currentTime = System.currentTimeMillis()
+        val timeSinceLastMessage = currentTime - lastMessageTime
+        val timeSinceLastResponse = currentTime - lastResponseTime
+        
+        // 检查是否有新消息
+        if (isWaitingForResponse && uiState.value.chatHistory.size > 0) {
+            val lastMessage = uiState.value.chatHistory.last()
+            if (lastMessage.author != authorMe) {
+                isWaitingForResponse = false
+                lastResponseTime = currentTime
+                // 清空输入框
+                userInputText = androidx.compose.ui.text.input.TextFieldValue()
+                Log.d(TAG, "[UIAutoInput] 收到AI响应，重置状态")
+            }
+        }
+        
+        // 检查是否需要自动输入
+        if ((isFirstInput || (!isWaitingForResponse && timeSinceLastResponse >= 10000)) && 
+            uiState.value.chatHistory.count { it.author == authorMe } < predefinedPrompts.size) {
+            
+            // 自动输入
+            val autoMsg = predefinedPrompts[currentPromptIndex]
+            Log.d(TAG, "[UIAutoInput] 触发自动输入: $autoMsg, sampleId=$sampleId, timeSinceLastResponse=$timeSinceLastResponse")
+            
+            // 更新输入框文本
+            userInputText = androidx.compose.ui.text.input.TextFieldValue(autoMsg)
+            currentPromptIndex = (currentPromptIndex + 1) % predefinedPrompts.size
+            
+            // 延迟一小段时间模拟用户思考
+            kotlinx.coroutines.delay(500)
+            
+            // 触发发送
+            viewModel.addChatHistory(Messaging(authorMe, autoMsg, getCurrentFormattedTime()))
+            EventBus.getDefault().post(Events.messageSentEvent(true, autoMsg))
+            Log.d(TAG, "[UIAutoInput] 自动输入已发送: $autoMsg")
+            
+            // 更新状态
+            lastMessageTime = currentTime
+            isWaitingForResponse = true
+            isFirstInput = false
+        }
+    }
 
     Column (modifier = Modifier.fillMaxSize()){
         Box(modifier = Modifier
@@ -123,30 +179,7 @@ fun ChatScreen(
             .weight(0.15f)
             .background(Color.White),
             contentAlignment = Alignment.Center){
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ModelSelection(index, num_device)
-                // 添加模拟按钮
-                androidx.compose.material3.Button(
-                    onClick = {
-                        isSimulationRunning = !isSimulationRunning
-                        if (isSimulationRunning) {
-                            currentPromptIndex = 0
-                        }
-                    },
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = if (isSimulationRunning) Color.Red else Color.Green
-                    )
-                ) {
-                    Text(
-                        text = if (isSimulationRunning) "Stop Simulation" else "Start Simulation",
-                        color = Color.White
-                    )
-                }
-            }
+            ModelSelection(index, num_device)
         }
         Box(modifier = Modifier
             .fillMaxWidth()
@@ -163,6 +196,8 @@ fun ChatScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             UserInput(
+                textState = userInputText,
+                setTextState = { userInputText = it },
                 onClicked = { },
                 onMessageSent = { content ->
                     viewModel.addChatHistory(Messaging(authorMe, content, getCurrentFormattedTime()))
@@ -174,26 +209,6 @@ fun ChatScreen(
                     }
                 },
             )
-        }
-    }
-
-    // 添加模拟逻辑
-    LaunchedEffect(isSimulationRunning) {
-        if (isSimulationRunning) {
-            while (isSimulationRunning && currentPromptIndex < testPrompts.size) {
-                // 发送消息
-                val content = testPrompts[currentPromptIndex]
-                viewModel.addChatHistory(Messaging(authorMe, content, getCurrentFormattedTime()))
-                EventBus.getDefault().post(Events.messageSentEvent(true, content))
-                
-                // 等待10秒
-                kotlinx.coroutines.delay(10000)
-                
-                // 更新索引
-                currentPromptIndex++
-            }
-            // 模拟结束后重置状态
-            isSimulationRunning = false
         }
     }
 }
