@@ -37,6 +37,8 @@ import org.zeromq.ZMQException;
 
 import com.example.SecureConnection.Utils.LBPause;
 import com.example.distribute_ui.DataRepository;
+import org.greenrobot.eventbus.EventBus;
+import com.example.distribute_ui.Events;
 
 
 public class Communication {
@@ -193,10 +195,22 @@ public class Communication {
                 
                 while (isHeartbeatRunning) {
                     try {
-                        // 发送心跳消息
-                        rootSocket.sendMore("HEARTBEAT");
-                        rootSocket.send("");
-//                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+                        // 检查APP是否在后台
+                        Events.GetBackgroundStatusEvent statusEvent = new Events.GetBackgroundStatusEvent();
+                        EventBus.getDefault().post(statusEvent);
+                        
+                        // 根据后台状态发送不同的心跳消息
+                        if (statusEvent.isInBackground()) {
+                            // APP在后台，发送特殊心跳
+                            rootSocket.sendMore("APP_BACKGROUND");
+                            rootSocket.send("");
+                            Log.d(TAG, "Heartbeat sent with action APP_BACKGROUND");
+                        } else {
+                            // APP在前台，发送普通心跳
+                            rootSocket.sendMore("HEARTBEAT");
+                            rootSocket.send("");
+                            Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+                        }
                         
                         // 接收心跳响应
                         String response = new String(rootSocket.recv(0));
@@ -259,19 +273,7 @@ public class Communication {
         Log.d(TAG, "心跳检测已停止");
     }
     
-    /**
-     * 处理系统故障
-     * 当检测到系统故障时，此方法将被调用进行恢复
-     * 
-     * 优化的恢复步骤：
-     * 1. 标记设备状态为"Recovering"
-     * 2. 触发负载重平衡，更新任务分配
-     * 3. 清理现有连接并重新建立通信
-     * 4. 更新Socket配置，而不中断推理线程
-     * 5. 将状态恢复为"Running"
-     * 
-     * 注意：此方法由Client.communicationOpenClose调用，不再直接处理通信
-     */
+   
     public void handleSystemFailure() {
         // 如果已经在故障处理或恢复中，避免重复处理
         Log.d(TAG, "Entering system failure handling procedure");

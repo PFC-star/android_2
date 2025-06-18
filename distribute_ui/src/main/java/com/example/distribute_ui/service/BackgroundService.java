@@ -15,7 +15,9 @@
  * - 工作节点(worker)：处理模型中间层
  */
 package com.example.distribute_ui.service;
+import android.app.ActivityManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.os.IBinder;
 import android.util.Log;
@@ -35,6 +37,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.Properties;
@@ -46,9 +49,12 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private  String serverStatus = "active";           // 是否需要monitor服务
     private final boolean running_classification = false;   // 是否为分类任务
     private boolean shouldStartInference = false;   // 是否开始推理
-    private boolean runningStatus = false;          // 是否为运行状态
+    public static boolean runningStatus = false;          // 是否为运行状态
     private boolean messageStatus = false;          // 是否收到消息
     public static boolean isServiceRunning = false; // 服务是否正在运行
+    private boolean isAppInBackground = false; // APP是否在后台
+    private Thread backgroundCheckThread = null; // 后台检测线程
+    private volatile boolean isBackgroundCheckRunning = true; // 后台检测线程运行标志
 
     private String messageContent = "";             // 存储用户输入的消息内容
 
@@ -464,6 +470,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         super.onCreate();
         isServiceRunning = true;
         EventBus.getDefault().register(this);  // 注册事件总线监听器
+        startBackgroundCheck(); // 启动后台检测
     }
 
     /**
@@ -474,6 +481,97 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     public void onDestroy() {
         super.onDestroy();
         isServiceRunning = false;
+        stopBackgroundCheck(); // 停止后台检测
         EventBus.getDefault().unregister(this);  // 取消事件总线监听器
+    }
+
+    /**
+     * 启动后台检测线程
+     * 定期检查APP是否在后台运行
+     */
+    private void startBackgroundCheck() {
+        backgroundCheckThread = new Thread(() -> {
+            while (isBackgroundCheckRunning) {
+                try {
+                    // 检查APP是否在后台
+                    boolean isBackground = !isAppInForeground();
+                    
+                    // 如果状态发生变化，发送事件
+                    if (isBackground != isAppInBackground) {
+                        isAppInBackground = isBackground;
+                        EventBus.getDefault().post(new Events.AppBackgroundEvent(isBackground));
+                        Log.d(TAG, "App background status changed: " + (isBackground ? "in background" : "in foreground"));
+                    }
+                    
+                    // 每秒检查一次
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "Background check thread interrupted: " + e.getMessage());
+                    break;
+                } catch (Exception e) {
+                    Log.e(TAG, "Error in background check: " + e.getMessage());
+                }
+            }
+        });
+        backgroundCheckThread.setDaemon(true);
+        backgroundCheckThread.start();
+        Log.d(TAG, "Background check thread started");
+    }
+
+    /**
+     * 停止后台检测线程
+     */
+    private void stopBackgroundCheck() {
+        isBackgroundCheckRunning = false;
+        if (backgroundCheckThread != null) {
+            backgroundCheckThread.interrupt();
+            backgroundCheckThread = null;
+        }
+        Log.d(TAG, "Background check thread stopped");
+    }
+
+    /**
+     * 检查APP是否在前台运行
+     * @return true if app is in foreground, false otherwise
+     */
+    private boolean isAppInForeground() {
+        ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (activityManager == null) return false;
+
+        List<ActivityManager.RunningAppProcessInfo> appProcesses = activityManager.getRunningAppProcesses();
+        if (appProcesses == null) return false;
+
+        String packageName = getPackageName();
+        for (ActivityManager.RunningAppProcessInfo appProcess : appProcesses) {
+            if (appProcess.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                    && appProcess.processName.equals(packageName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 监听APP后台状态变化事件
+     */
+    @Subscribe(threadMode = ThreadMode.BACKGROUND)
+    public void onAppBackgroundEvent(Events.AppBackgroundEvent event) {
+        if (event.isInBackground()) {
+            Log.d(TAG, "App entered background, taking appropriate actions");
+            // 在这里添加APP进入后台时需要执行的操作
+            // 例如：暂停某些操作、保存状态等
+        } else {
+            Log.d(TAG, "App entered foreground, resuming normal operations");
+            // 在这里添加APP回到前台时需要执行的操作
+            // 例如：恢复暂停的操作、更新UI等
+        }
+    }
+
+    /**
+     * 处理获取后台状态的事件
+     */
+    @Subscribe(threadMode = ThreadMode.BACKGROUND)
+    public void onGetBackgroundStatus(Events.GetBackgroundStatusEvent event) {
+        event.setInBackground(isAppInBackground);
     }
 }

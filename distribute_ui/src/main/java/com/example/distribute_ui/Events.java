@@ -38,4 +38,32 @@ public class Events {
             this.sampleId = sampleId;
         }
     }
+
+    public static class AppBackgroundEvent {
+        private final boolean isInBackground;
+
+        public AppBackgroundEvent(boolean isInBackground) {
+            this.isInBackground = isInBackground;
+        }
+
+        public boolean isInBackground() {
+            return isInBackground;
+        }
+    }
+
+    public static class GetBackgroundStatusEvent {
+        private boolean isInBackground;
+
+        public GetBackgroundStatusEvent() {
+            this.isInBackground = false;
+        }
+
+        public void setInBackground(boolean inBackground) {
+            isInBackground = inBackground;
+        }
+
+        public boolean isInBackground() {
+            return isInBackground;
+        }
+    }
 }

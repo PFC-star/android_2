@@ -128,6 +128,8 @@ fun ChatScreen(
     var hasStarted by remember { mutableStateOf(false) }
     var lastResponseTime by remember { mutableStateOf(0L) }
     var nextPrompt by remember { mutableStateOf("") }
+    var shouldSendNext by remember { mutableStateOf(false) }
+    var isFirstRound by remember { mutableStateOf(true) }
 
     // 自动输入逻辑
     LaunchedEffect(sampleId, uiState.value.chatHistory.size) {
@@ -137,7 +139,7 @@ fun ChatScreen(
         
         Log.d(TAG, "[UIAutoInput] 状态检查: isWaitingForResponse=$isWaitingForResponse, " +
                   "timeSinceLastResponse=$timeSinceLastResponse, chatHistorySize=${uiState.value.chatHistory.size}, " +
-                  "hasStarted=$hasStarted")
+                  "hasStarted=$hasStarted, shouldSendNext=$shouldSendNext, isFirstRound=$isFirstRound")
         
         // 检查是否有新消息
         if (isWaitingForResponse && uiState.value.chatHistory.size > 0) {
@@ -166,16 +168,39 @@ fun ChatScreen(
             // 延迟一小段时间模拟用户思考
             kotlinx.coroutines.delay(500)
             
-            // 更新输入框文本并发送
-            userInputText = androidx.compose.ui.text.input.TextFieldValue(nextPrompt)
+            if (isFirstRound) {
+                // 第一轮直接发送
+                viewModel.addChatHistory(Messaging(authorMe, nextPrompt, getCurrentFormattedTime()))
+                EventBus.getDefault().post(Events.messageSentEvent(true, nextPrompt))
+                Log.d(TAG, "[UIAutoInput] 第一轮自动输入已发送: $nextPrompt")
+                
+                // 更新状态
+                lastMessageTime = currentTime
+                isWaitingForResponse = true
+                hasStarted = true
+                isFirstRound = false
+            } else {
+                // 后续轮次先更新输入框
+                userInputText = androidx.compose.ui.text.input.TextFieldValue(nextPrompt)
+                shouldSendNext = true
+                Log.d(TAG, "[UIAutoInput] 准备下一轮输入: $nextPrompt")
+            }
+        }
+    }
+
+    // 发送消息的逻辑
+    LaunchedEffect(shouldSendNext) {
+        if (shouldSendNext) {
+            // 发送消息
             viewModel.addChatHistory(Messaging(authorMe, nextPrompt, getCurrentFormattedTime()))
             EventBus.getDefault().post(Events.messageSentEvent(true, nextPrompt))
             Log.d(TAG, "[UIAutoInput] 自动输入已发送: $nextPrompt")
             
             // 更新状态
-            lastMessageTime = currentTime
+            lastMessageTime = System.currentTimeMillis()
             isWaitingForResponse = true
             hasStarted = true
+            shouldSendNext = false
         }
     }
 
