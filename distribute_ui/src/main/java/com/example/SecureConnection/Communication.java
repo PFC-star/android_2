@@ -39,6 +39,9 @@ import com.example.SecureConnection.Utils.LBPause;
 import com.example.distribute_ui.DataRepository;
 import org.greenrobot.eventbus.EventBus;
 import com.example.distribute_ui.Events;
+import java.util.concurrent.ConcurrentHashMap;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
 
 
 public class Communication {
@@ -107,6 +110,8 @@ public class Communication {
     private String modelName;
     private int role;
 
+    // 1. 在 Communication 类中添加静态线程安全的故障时间表：
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> faultStartTimes = new java.util.concurrent.ConcurrentHashMap<>();
 
     public Communication(Config cfg, Context conText, String modelName, int role) {
         Communication.sessions = new ArrayList<>();
@@ -199,19 +204,22 @@ public class Communication {
                         Events.GetBackgroundStatusEvent statusEvent = new Events.GetBackgroundStatusEvent();
                         EventBus.getDefault().post(statusEvent);
                         
-                        // 根据后台状态发送不同的心跳消息
-                        if (statusEvent.isInBackground()) {
-                            // APP在后台，发送特殊心跳
-                            rootSocket.sendMore("APP_BACKGROUND");
-                            rootSocket.send("");
-                            Log.d(TAG, "Heartbeat sent with action APP_BACKGROUND");
-                        } else {
-                            // APP在前台，发送普通心跳
-                            rootSocket.sendMore("HEARTBEAT");
-                            rootSocket.send("");
-                            Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
-                        }
-                        
+//                        // 根据后台状态发送不同的心跳消息
+//                        if (statusEvent.isInBackground()) {
+//                            // APP在后台，发送特殊心跳
+//                            rootSocket.sendMore("APP_BACKGROUND");
+//                            rootSocket.send("");
+//                            Log.d(TAG, "Heartbeat sent with action APP_BACKGROUND");
+//                        } else {
+//                            // APP在前台，发送普通心跳
+//                            rootSocket.sendMore("HEARTBEAT");
+//                            rootSocket.send("");
+//                            Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+//                        }
+                        rootSocket.sendMore("HEARTBEAT");
+                        rootSocket.send("");
+                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+
                         // 接收心跳响应
                         String response = new String(rootSocket.recv(0));
                         
@@ -281,19 +289,21 @@ public class Communication {
             Log.d(TAG, "System already in failure/recovery state, ignoring duplicate recovery trigger");
             return;
         }
-        
+        // 故障发生时间
+        long faultTime = System.currentTimeMillis();
         Log.w(TAG, "System failure handling initiated");
-        param.status = "Recovering"; // 更改为恢复中状态
-        
+        param.status = "Recovering";
+        // 遍历所有活跃 sample_id，全部 put 进 faultStartTimes
+        for (Integer sid : activeAggregators.keySet()) {
+            String affectedQueryId = String.valueOf(sid);
+            faultStartTimes.put(affectedQueryId, faultTime);
+        }
         try {
-            // 设置LoadBalance的reSampleId触发重载平衡
             Communication.loadBalance.setReSampleId(sampleId);
             
             // 保存当前Socket队列的大小，用于恢复后验证
             int socketPairsCount = allSockets.size();
             Log.d(TAG, "当前Socket对数量: " + socketPairsCount);
-            
-            // 清理现有Socket连接
             cleanExistingConnections();
             
             // 使用LoadBalance的方法更新设备映射和会话
@@ -324,6 +334,9 @@ public class Communication {
             
             // 注意：我们不再调用resumeInference()方法，因为我们不中断推理线程
             // 当前推理线程会在下一次oneStep迭代时使用新的Socket连接
+
+
+
         } catch (Exception e) {
             Log.e(TAG, "Error during system failure recovery: " + e.getMessage());
             param.status = "Failure"; // 恢复失败，标记为故障状态
@@ -556,6 +569,7 @@ public class Communication {
                     }
                 }
                 System.out.println("Inference completed");
+                // 删除老的QueryLogEvent上报，统一在OneStep.run()中上报
             }
         } else {    // 数据缺失
             System.out.println("Data missing");
@@ -620,14 +634,17 @@ public class Communication {
                         Log.d(TAG, "等待输入");
                         Thread.sleep(1000);
                     }
-                    
                     // 再次检查终止标志
                     if (!isRunning) break;
-                    
                     // 传递当前字符串和tokenizer指针，将字符串编码为整数数组
                     int[] data = encodeString(input_data.get(sampleId), tokenizer);
                     System.out.println("encode array: : " + Arrays.toString(data));
                     this.InputIds.put(sampleId, Utils.convertIntegerArrayToArrayList(data));    // 将编码结果记录到InputIds(映射表)中
+                    // 新增：同步 InputString
+                    if (InputString == null || InputString.length != input_data.size()) {
+                        InputString = new String[input_data.size()];
+                    }
+                    InputString[sampleId] = input_data.get(sampleId);
                 }
             }
 
@@ -716,6 +733,15 @@ public class Communication {
         // 添加状态跟踪变量
         private String prevStatus = ""; // 用于跟踪上一个状态
 
+        // 新增：聚合日志对象
+        private QueryLogAggregator logAggregator;
+        // 新增：本轮故障和能耗事件收集
+        private final List<Events.FaultEvent> faultEvents = new ArrayList<>();
+        private final List<Events.EnergyEvent> energyEvents = new ArrayList<>();
+
+        // 在 multiSteps 类中添加：
+        private final Map<String, Long> faultStartTimes = new HashMap<>();
+
         // 构造函数，初始化样本 ID 和信号量，并从 allSockets 队列中获取服务器端和客户端的套接字映射
         public multiSteps(int sample_id, Semaphore latch) {
             this.sample_id = sample_id;
@@ -731,6 +757,30 @@ public class Communication {
             this.serverSocket = sockets.get(1); // 获取前驱发送方的socket映射表
 
             this.latch = latch;
+            // 初始化聚合日志对象
+            logAggregator = new QueryLogAggregator();
+            logAggregator.deviceId = String.valueOf(cfg.deviceId);
+            logAggregator.role = cfg.isHeader() ? "header" : (cfg.isTailer() ? "tailer" : "worker");
+            logAggregator.queryId = String.valueOf(sample_id);
+            logAggregator.userQuery = cfg.isHeader() && InputString != null && InputString.length > sample_id ? InputString[sample_id] : "";
+            // 注册到全局Map
+            activeAggregators.put(sample_id, logAggregator);
+            // 注册事件监听
+            EventBus.getDefault().register(this);
+        }
+
+        // 监听本轮的故障和能耗事件
+        @Subscribe(threadMode = ThreadMode.BACKGROUND)
+        public void onFaultEvent(Events.FaultEvent event) {
+            synchronized (faultEvents) {
+                faultEvents.add(event);
+            }
+        }
+        @Subscribe(threadMode = ThreadMode.BACKGROUND)
+        public void onEnergyEvent(Events.EnergyEvent event) {
+            synchronized (energyEvents) {
+                energyEvents.add(event);
+            }
         }
 
         @Override
@@ -741,11 +791,12 @@ public class Communication {
                 System.out.println("ERROR: Set up max_length");
             } else if (param.max_length == 0) { // 当max_length为0时代表分类任务
                 System.out.println("SampleID: " + sample_id);
+                System.out.println("param.max_length == 0");
                 int receivedId = 0;
                 try {
                     // 在执行OneStep前检查恢复状态
                     if (!"Recovery".equals(param.status) && !"Recovering".equals(param.status) && !"Failure".equals(param.status)) {
-                        receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run();
+                        receivedId = new OneStep(this.sample_id, serverSocket, clientSocket).run(logAggregator);
                     } else {
                         Log.d(TAG, "系统处于恢复或故障状态，跳过推理");
                     }
@@ -753,6 +804,35 @@ public class Communication {
                     throw new RuntimeException(e);
                 }
                 cleanUpBuffer(receivedId);
+                // 推理结束，聚合日志上报
+//                logAggregator.response = cfg.isHeader() && OutputData.get(sample_id) != null ? new String(OutputData.get(sample_id)) : "";
+                logAggregator.tokens = cfg.isHeader() && InputIds.get(sample_id) != null ? InputIds.get(sample_id).size() : 0;
+                if (logAggregator.tokens > 0 && logAggregator.tailerResultEnd > 0 && logAggregator.clientReceiveStart > 0) {
+                    logAggregator.throughput = logAggregator.tokens * 1000.0 / (logAggregator.tailerResultEnd - logAggregator.clientReceiveStart);
+                }
+                // 打包为SessionLogEvent并上报
+                Events.SessionLogEvent sessionLog = new Events.SessionLogEvent(
+                        new Events.QueryLogEvent(
+                                logAggregator.deviceId, logAggregator.role, logAggregator.queryId, logAggregator.userQuery, logAggregator.response,
+                                logAggregator.clientReceiveStart, logAggregator.clientReceiveEnd,
+                                logAggregator.inferenceStart, logAggregator.inferenceEnd,
+                                logAggregator.serverSendStart, logAggregator.serverSendEnd,
+                                logAggregator.tailerResultStart, logAggregator.tailerResultEnd,
+                                logAggregator.tokens, logAggregator.throughput,
+                                false, -1, -1,
+                                logAggregator.clientReceiveTimes,
+                                logAggregator.inferenceTimes,
+                                logAggregator.serverSendTimes,
+                                logAggregator.tailerResultTimes
+                        ),
+                        new ArrayList<>(faultEvents),
+                        new ArrayList<>(energyEvents)
+                );
+                EventBus.getDefault().post(sessionLog);
+                // 清理Map，避免内存泄漏
+                activeAggregators.remove(sample_id);
+                // 注销事件监听
+                EventBus.getDefault().unregister(this);
             } else {    // 当max_length>0时代表生成任务
                 int receivedId = sampleId-1;          // 获取当前批次
                 int input_size = param.max_length;  // 当前处理的字符串长度
@@ -761,8 +841,6 @@ public class Communication {
                 Set<String> seenWindows = new HashSet<>();
                 final int WINDOW_SIZE = 5;
                 final int REPEAT_SIZE = 4;
-
-                // 对每个token进行处理
 
                 int m = 0;
                 while (m < param.max_length)
@@ -778,6 +856,22 @@ public class Communication {
                         Log.e(TAG,"系统当前状态:"+param.status+ "系统前状态:"+prevStatus);
                         if(("ResumeStart".equals(param.status) && "Running".equals(prevStatus))  || ( m==1) )  {
                             Log.d(TAG, "系统已从恢复状态转为运行状态，重新获取Socket");
+                            long recoveryTime = System.currentTimeMillis();
+                            String deviceId = "" + cfg.deviceId;
+                            String roleStr = cfg.isHeader() ? "header" : (cfg.isTailer() ? "tailer" : "worker");
+                            String faultType = "SYSTEM_FAILURE";
+                            String affectedQueryId = String.valueOf(this.sample_id);
+                            Long faultTime = Communication.faultStartTimes.get(affectedQueryId);
+                            if (faultTime != null) {
+                                Events.FaultEvent faultEvent = new Events.FaultEvent(deviceId, roleStr, faultType, faultTime, recoveryTime, affectedQueryId);
+                                EventBus.getDefault().post(faultEvent);
+                                Communication.faultStartTimes.remove(affectedQueryId);
+                            } else {
+                                // 没有找到对应的故障发生时间，降级为单独恢复事件
+                                Events.FaultEvent faultEvent = new Events.FaultEvent(deviceId, roleStr, faultType, -1, recoveryTime, affectedQueryId);
+                                EventBus.getDefault().post(faultEvent);
+                            }
+                             // 新增：记录到 logAggregator
                             if (m==0){
                                 Log.d(TAG, "m======0");
                             }
@@ -815,15 +909,17 @@ public class Communication {
                         // 更新prevStatus，用于下一次循环检查状态变化
                         if (!prevStatus.equals(param.status)) {
                             prevStatus = param.status;
-
                         }
                         
                         int flag = 1;
-                        // 调用OneStep处理当前token，使用可能已更新的Socket
-                        flag = new OneStep(this.sample_id, serverSocket, clientSocket).run();
-
+                        try {
+                            // 传递logAggregator用于聚合时间戳
+                            flag = new OneStep(this.sample_id, serverSocket, clientSocket).run(logAggregator);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                        // 恢复header节点每生成一个token就更新UI的逻辑
                         if (cfg.isHeader()) {
-                            // 如果是头设备，进行解码并同步结果
                             input_size = Math.min(input_size, InputIds.get(receivedId).size());
                             // 截取字符串中的生成部分
                             ArrayList<Integer> decodeList = new ArrayList(InputIds.get(receivedId).subList(input_size-1, InputIds.get(receivedId).size()));
@@ -833,54 +929,8 @@ public class Communication {
                             System.out.println("decodedString:" + decodedString);
                             DataRepository.INSTANCE.updateDecodingString(decodedString);
                             System.out.println("token" + m + " Results Obtained");
-
-                            List<Integer> currentTokens = new ArrayList<>(InputIds.get(receivedId).subList(input_size - 1, InputIds.get(receivedId).size()));
-                            boolean stopGeneration = false;
-
-                            // 检测 1：滑动窗口重复
-                            if (currentTokens.size() >= WINDOW_SIZE) {
-                                List<Integer> currentWindow = currentTokens.subList(currentTokens.size() - WINDOW_SIZE, currentTokens.size());
-                                // 将窗口转换为唯一字符串（例如 "1,2,3"）
-                                StringBuilder windowKeyBuilder = new StringBuilder();
-                                for (int token : currentWindow) {
-                                    windowKeyBuilder.append(token).append(",");
-                                }
-                                String windowKey = windowKeyBuilder.toString();
-                                if (seenWindows.contains(windowKey)) {
-                                    stopGeneration = true;
-                                } else {
-                                    seenWindows.add(windowKey);
-                                }
-                            }
-
-                            // 检测 2：连续相同 token
-                            if (currentTokens.size() >= REPEAT_SIZE) {
-                                List<Integer> lastN = currentTokens.subList(currentTokens.size() - REPEAT_SIZE, currentTokens.size());
-                                int lastToken = lastN.get(lastN.size() - 1);
-                                boolean allSame = true;
-                                for (int token : lastN) {
-                                    if (token != lastToken) {
-                                        allSame = false;
-                                        break;
-                                    }
-                                }
-                                if (allSame) {
-                                    stopGeneration = true;
-                                }
-                            }
-
-                            // 如果触发停止条件，终止生成
-                            if (stopGeneration) {
-//                                System.out.println("重复生成，终止解码");
- 
-                                
-                                    Log.d(TAG, "重复生成，终止解码");
-                                    Thread.sleep(100); // 短暂休眠，避免CPU空转
-//                                    m--; // 退回一步，以便恢复后重新处理当前token
-//                                    continue; // 跳过当前循环
-                                 
-                              
-                            }
+                            // 新增：每次都记录最新的 response
+                            logAggregator.response = decodedString;
                         }
 
                         if(flag == 0)
@@ -889,12 +939,41 @@ public class Communication {
 //                            break;
                         }
 
-                    } catch (InterruptedException | JSONException e) {
+                    } catch (InterruptedException e) {
                         throw new RuntimeException(e);
                     }
                     System.out.println("Token " + m + " Process Time: " + (System.nanoTime() - startTime) / 1000000000.0);
                 }
                 cleanUpBuffer(this.sample_id);  // 清理缓冲区
+
+//                logAggregator.response = cfg.isHeader() && OutputData.get(sample_id) != null ? new String(OutputData.get(sample_id)) : "";
+                logAggregator.tokens = cfg.isHeader() && InputIds.get(sample_id) != null ? InputIds.get(sample_id).size() : 0;
+                if (logAggregator.tokens > 0 && logAggregator.tailerResultEnd > 0 && logAggregator.clientReceiveStart > 0) {
+                    logAggregator.throughput = logAggregator.tokens * 1000.0 / (logAggregator.tailerResultEnd - logAggregator.clientReceiveStart);
+                }
+                // 打包为SessionLogEvent并上报
+                Events.SessionLogEvent sessionLog = new Events.SessionLogEvent(
+                        new Events.QueryLogEvent(
+                                logAggregator.deviceId, logAggregator.role, logAggregator.queryId, logAggregator.userQuery, logAggregator.response,
+                                logAggregator.clientReceiveStart, logAggregator.clientReceiveEnd,
+                                logAggregator.inferenceStart, logAggregator.inferenceEnd,
+                                logAggregator.serverSendStart, logAggregator.serverSendEnd,
+                                logAggregator.tailerResultStart, logAggregator.tailerResultEnd,
+                                logAggregator.tokens, logAggregator.throughput,
+                                false, -1, -1,
+                                logAggregator.clientReceiveTimes,
+                                logAggregator.inferenceTimes,
+                                logAggregator.serverSendTimes,
+                                logAggregator.tailerResultTimes
+                        ),
+                        new ArrayList<>(faultEvents),
+                        new ArrayList<>(energyEvents)
+                );
+                EventBus.getDefault().post(sessionLog);
+                // 清理Map，避免内存泄漏
+                activeAggregators.remove(sample_id);
+                // 注销事件监听
+                EventBus.getDefault().unregister(this);
             }
 
             try {   // 将客户端和服务器端的套接字重新放回 allSockets 队列中
@@ -1204,91 +1283,96 @@ public class Communication {
          * @throws InterruptedException 线程中断时抛出
          * @throws JSONException JSON处理异常
          */
-        public int run() throws RuntimeException, InterruptedException, JSONException {
+        public int run(QueryLogAggregator aggregator) throws RuntimeException, InterruptedException, JSONException {
             int receivedId = this.sample_id;    // 获取当前批次ID
             int flag = 1;  // 默认继续处理标志
-            
+
+            // 四阶段详细时间戳
+            long clientReceiveStart = 0, clientReceiveEnd = 0;
+            long inferenceStart = 0, inferenceEnd = 0;
+            long serverSendStart = 0, serverSendEnd = 0;
+            long tailerResultStart = 0, tailerResultEnd = 0;
+
             try {
                 // 检查系统状态和推理是否被中断
                 if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status) || "WaitingStart".equals(param.status)) {
                     Log.d(TAG, "系统正在故障恢复中，跳过推理步骤");
                     return flag;
                 }
-                
                 if (!isRunning) {
                     Log.d(TAG, "推理已被中断，跳过推理步骤");
                     return flag;
                 }
-                
+
                 // 第一步：作为客户端接收数据
-                long startTime = System.nanoTime();  // 记录开始时间
+                clientReceiveStart = System.currentTimeMillis();
                 try {
                     receivedId = procssingAsClient(receivedId);
-                    System.out.println(" 第一步：作为客户端接收数据: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (org.zeromq.ZMQException e) {
-                    // 处理Socket通信异常
                     Log.w(TAG, "客户端接收数据时Socket操作被中断: " + e.getMessage());
                     checkSystemStatus();
                     return flag;
                 }
-                
-                // 再次检查系统状态，防止在第一步完成后系统状态已变化
-                if (checkSystemStatus()) {
-                    return flag;
-                }
+                clientReceiveEnd = System.currentTimeMillis();
+                Log.d(TAG, "[QueryLog] Client receive phase: " + (clientReceiveEnd - clientReceiveStart) + " ms, sampleId: " + receivedId);
+
+                if (checkSystemStatus()) return flag;
 
                 // 第二步：执行推理计算
-                startTime = System.nanoTime();
+                inferenceStart = System.currentTimeMillis();
                 try {
                     inferenceProcedure(receivedId);  // 调用推理处理方法
-                    System.out.println("第二步：执行推理计算: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (Exception e) {
-                    // 处理推理计算异常
                     Log.e(TAG, "推理计算过程发生异常: " + e.getMessage(), e);
                     checkSystemStatus();
                     return flag;
                 }
-                
-                // 再次检查系统状态
-                if (checkSystemStatus()) {
-                    return flag;
-                }
+                inferenceEnd = System.currentTimeMillis();
+                Log.d(TAG, "[QueryLog] Inference phase: " + (inferenceEnd - inferenceStart) + " ms, sampleId: " + receivedId);
+
+                if (checkSystemStatus()) return flag;
 
                 // 第三步：作为服务器发送数据
-                startTime = System.nanoTime();
+                serverSendStart = System.currentTimeMillis();
                 try {
                     processAsServer(receivedId);
-                    System.out.println("第三步：作为服务器发送数据: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (org.zeromq.ZMQException e) {
-                    // 处理Socket通信异常
                     Log.w(TAG, "服务器发送数据时Socket操作被中断: " + e.getMessage());
                     checkSystemStatus();
                     return flag;
                 }
-                
-                // 再次检查系统状态
-                if (checkSystemStatus()) {
-                    return flag;
-                }
+                serverSendEnd = System.currentTimeMillis();
+                Log.d(TAG, "[QueryLog] Server send phase: " + (serverSendEnd - serverSendStart) + " ms, sampleId: " + receivedId);
+
+                if (checkSystemStatus()) return flag;
 
                 // 第四步：获取尾节点结果
-                startTime = System.nanoTime();
+                tailerResultStart = System.currentTimeMillis();
                 try {
                     flag = obtainResultsFromTailer(receivedId);  // 获取处理状态标志
-                    System.out.println("第四步：获取尾节点结果: " + (System.nanoTime() - startTime) / 1000000000.0);
                 } catch (Exception e) {
-                    // 处理结果获取异常
                     Log.w(TAG, "获取尾节点结果时发生异常: " + e.getMessage());
                     checkSystemStatus();
                     return flag;
                 }
+                tailerResultEnd = System.currentTimeMillis();
+                Log.d(TAG, "[QueryLog] Tailer result phase: " + (tailerResultEnd - tailerResultStart) + " ms, sampleId: " + receivedId);
+
             } catch (Exception e) {
-                // 处理其他未预期异常
                 Log.e(TAG, "推理流程中发生未预期异常: " + e.getMessage(), e);
-                // 不抛出异常，防止应用崩溃
             }
-            
-            return flag;  // 返回处理状态标志
+
+            // 将本次token的时间戳追加到聚合对象
+            if (aggregator != null) {
+                aggregator.updatePhaseTimes(
+                        clientReceiveStart, clientReceiveEnd,
+                        inferenceStart, inferenceEnd,
+                        serverSendStart, serverSendEnd,
+                        tailerResultStart, tailerResultEnd
+                );
+            }
+
+            return flag;
         }
         
         /**
@@ -1789,6 +1873,48 @@ public class Communication {
         }
     }
 
+    // 聚合一轮交互日志的辅助类
+    public static class QueryLogAggregator {
+        public String deviceId;
+        public String role;
+        public String queryId;
+        public String userQuery;
+        public String response;
+        public long clientReceiveStart = -1;
+        public long clientReceiveEnd = -1;
+        public long inferenceStart = -1;
+        public long inferenceEnd = -1;
+        public long serverSendStart = -1;
+        public long serverSendEnd = -1;
+        public long tailerResultStart = -1;
+        public long tailerResultEnd = -1;
+        public int tokens = 0;
+        public double throughput = 0.0;
+        // 新增：每个token的详细阶段时间戳
+        public List<long[]> clientReceiveTimes = new ArrayList<>(); // [start, end]
+        public List<long[]> inferenceTimes = new ArrayList<>();
+        public List<long[]> serverSendTimes = new ArrayList<>();
+        public List<long[]> tailerResultTimes = new ArrayList<>();
+        // 记录每个阶段的首/末时间戳
+        public void updatePhaseTimes(long crs, long cre, long is, long ie, long sss, long sse, long trs, long tre) {
+            if (clientReceiveStart == -1 || crs < clientReceiveStart) clientReceiveStart = crs;
+            if (clientReceiveEnd == -1 || cre < clientReceiveEnd) clientReceiveEnd = cre;
+            if (inferenceStart == -1 || is < inferenceStart) inferenceStart = is;
+            if (inferenceEnd == -1 || ie > inferenceEnd) inferenceEnd = ie;
+            if (serverSendStart == -1 || sss < serverSendStart) serverSendStart = sss;
+            if (serverSendEnd == -1 || sse > serverSendEnd) serverSendEnd = sse;
+            if (tailerResultStart == -1 || trs < tailerResultStart) tailerResultStart = trs;
+            if (tailerResultEnd == -1 || tre > tailerResultEnd) tailerResultEnd = tre;
+            // 新增：每个token的详细阶段时间戳
+            clientReceiveTimes.add(new long[]{crs, cre});
+            inferenceTimes.add(new long[]{is, ie});
+            serverSendTimes.add(new long[]{sss, sse});
+            tailerResultTimes.add(new long[]{trs, tre});
+        }
+    }
+
+    // 全局静态Map，记录活跃的logAggregator
+    private static final Map<Integer, QueryLogAggregator> activeAggregators = new ConcurrentHashMap<>();
 }
 
 

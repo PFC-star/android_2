@@ -19,6 +19,7 @@ import android.app.ActivityManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.IBinder;
 import android.util.Log;
 import androidx.annotation.Nullable;
@@ -41,6 +42,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.Properties;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 public class BackgroundService extends Service {    // 继承自Service，表明为一个服务
     public static double[] results;                 // 存储推理结果
@@ -55,8 +58,23 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private boolean isAppInBackground = false; // APP是否在后台
     private Thread backgroundCheckThread = null; // 后台检测线程
     private volatile boolean isBackgroundCheckRunning = true; // 后台检测线程运行标志
+    private Thread energyMonitorThread = null;
+    private volatile boolean isEnergyMonitorRunning = true;
 
     private String messageContent = "";             // 存储用户输入的消息内容
+
+    // 1. 新增事件类（建议正式放到 Events.java）
+    public static class ScreenOffEvent {
+        private final boolean isScreenOff;
+        public ScreenOffEvent(boolean isScreenOff) {
+            this.isScreenOff = isScreenOff;
+        }
+        public boolean isScreenOff() { return isScreenOff; }
+    }
+
+    // 2. 在 BackgroundService 中添加广播接收器相关成员
+    private android.content.BroadcastReceiver screenReceiver = null;
+    private boolean isScreenOff = false;
 
     /**
      * 监听RunningStatusEvent事件
@@ -471,6 +489,9 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         isServiceRunning = true;
         EventBus.getDefault().register(this);  // 注册事件总线监听器
         startBackgroundCheck(); // 启动后台检测
+        startEnergyMonitor(); // 启动能耗采集
+        // 注册息屏/亮屏广播
+        registerScreenReceiver();
     }
 
     /**
@@ -482,7 +503,10 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         super.onDestroy();
         isServiceRunning = false;
         stopBackgroundCheck(); // 停止后台检测
+        stopEnergyMonitor(); // 停止能耗采集
         EventBus.getDefault().unregister(this);  // 取消事件总线监听器
+        // 注销息屏/亮屏广播
+        unregisterScreenReceiver();
     }
 
     /**
@@ -573,5 +597,165 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onGetBackgroundStatus(Events.GetBackgroundStatusEvent event) {
         event.setInBackground(isAppInBackground);
+    }
+
+    /**
+     * 启动能耗采集线程
+     */
+    private void startEnergyMonitor() {
+        energyMonitorThread = new Thread(() -> {
+            while (isEnergyMonitorRunning) {
+                try {
+                    // 采集能耗数据
+                    int battery = getBatteryLevel();
+                    double cpuUsage = getCpuUsage();
+                    double temperature = getDeviceTemperature();
+                    long timestamp = System.currentTimeMillis();
+                    String deviceId = android.os.Build.SERIAL;
+                    String roleStr = role;
+                    // 发送能耗事件
+                    EventBus.getDefault().post(new com.example.distribute_ui.Events.EnergyEvent(deviceId, roleStr, timestamp, battery, cpuUsage, temperature));
+                    Thread.sleep(10000); // 每10秒采集一次
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+        energyMonitorThread.setDaemon(true);
+        energyMonitorThread.start();
+    }
+
+    private void stopEnergyMonitor() {
+        isEnergyMonitorRunning = false;
+        if (energyMonitorThread != null) {
+            energyMonitorThread.interrupt();
+            energyMonitorThread = null;
+        }
+    }
+
+    // 获取电量百分比
+    private int getBatteryLevel() {
+        // 伪实现，实际可用BatteryManager
+        return 80;
+    }
+    // 获取CPU占用率
+    private double getCpuUsage() {
+        // 伪实现，实际可用 /proc/stat 或系统API
+        return 0.25;
+    }
+    // 获取设备温度
+    private double getDeviceTemperature() {
+        // 伪实现，实际可用传感器API
+        return 36.5;
+    }
+
+    // 监听SessionLogEvent
+    @Subscribe(threadMode = ThreadMode.BACKGROUND)
+    public void onSessionLogEvent(com.example.distribute_ui.Events.SessionLogEvent event) {
+        sendLogToServer(event);
+    }
+
+    // 日志发送到服务端（此处仅打印日志，后续可扩展为发送功能）
+    private void sendLogToServer(Object logEvent) {
+        if (logEvent instanceof com.example.distribute_ui.Events.SessionLogEvent) {
+            com.example.distribute_ui.Events.SessionLogEvent sessionLog = (com.example.distribute_ui.Events.SessionLogEvent) logEvent;
+            StringBuilder sb = new StringBuilder();
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+            sb.append("\n==== SessionLogEvent ====");
+            // 打印 QueryLogEvent
+            com.example.distribute_ui.Events.QueryLogEvent q = sessionLog.queryLog;
+            sb.append("\n[QueryLog] id:").append(q.queryId)
+              .append(", userQuery:").append(q.userQuery)
+              .append(", response:").append(q.response)
+              .append("\n tokens:").append(q.tokens)
+              .append(", throughput:").append(q.throughput);
+            // 打印每个token的详细阶段时间戳
+            int tokenCount = q.clientReceiveTimes != null ? q.clientReceiveTimes.size() : 0;
+            sb.append("\n[TokenStageTimes] count:").append(tokenCount);
+            for (int i = 0; i < tokenCount; i++) {
+                sb.append("\n  token[").append(i).append("] ");
+                if (q.clientReceiveTimes != null && i < q.clientReceiveTimes.size()) {
+                    long[] t = q.clientReceiveTimes.get(i);
+                    sb.append("clientReceive:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                }
+                if (q.inferenceTimes != null && i < q.inferenceTimes.size()) {
+                    long[] t = q.inferenceTimes.get(i);
+                    sb.append("inference:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                }
+                if (q.serverSendTimes != null && i < q.serverSendTimes.size()) {
+                    long[] t = q.serverSendTimes.get(i);
+                    sb.append("serverSend:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                }
+                if (q.tailerResultTimes != null && i < q.tailerResultTimes.size()) {
+                    long[] t = q.tailerResultTimes.get(i);
+                    sb.append("tailerResult:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1])));
+                }
+            }
+            // 打印 FaultEvent
+            sb.append("\n[FaultEvents] count:").append(sessionLog.faultEvents.size());
+            for (com.example.distribute_ui.Events.FaultEvent f : sessionLog.faultEvents) {
+                sb.append("\n  type:").append(f.faultType)
+                  .append(", time:").append(f.faultTime > 0 ? sdf.format(new Date(f.faultTime)) : "-")
+                  .append(", recovery:").append(f.recoveryTime > 0 ? sdf.format(new Date(f.recoveryTime)) : "-")
+                  .append(", affectedQueryId:").append(f.affectedQueryId);
+            }
+            // 打印 EnergyEvent
+            sb.append("\n[EnergyEvents] count:").append(sessionLog.energyEvents.size());
+            for (com.example.distribute_ui.Events.EnergyEvent e : sessionLog.energyEvents) {
+                sb.append("\n  time:").append(e.timestamp > 0 ? sdf.format(new Date(e.timestamp)) : "-")
+                  .append(", battery:").append(e.battery)
+                  .append(", cpu:").append(e.cpuUsage)
+                  .append(", temp:").append(e.temperature);
+            }
+            sb.append("\n========================");
+            Log.d(TAG, sb.toString());
+        } else {
+            Log.d(TAG, "Send log to server: " + logEvent.toString());
+        }
+    }
+
+    // 3. 注册/注销广播方法
+    private void registerScreenReceiver() {
+        if (screenReceiver == null) {
+            screenReceiver = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent.getAction();
+                    if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                        isScreenOff = true;
+                        EventBus.getDefault().post(new ScreenOffEvent(true));
+                        Log.d(TAG, "Screen turned off");
+                    } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                        isScreenOff = false;
+                        EventBus.getDefault().post(new ScreenOffEvent(false));
+                        Log.d(TAG, "Screen turned on");
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_SCREEN_OFF);
+            filter.addAction(Intent.ACTION_SCREEN_ON);
+            registerReceiver(screenReceiver, filter);
+            Log.d(TAG, "Screen receiver registered");
+        }
+    }
+    private void unregisterScreenReceiver() {
+        if (screenReceiver != null) {
+            unregisterReceiver(screenReceiver);
+            screenReceiver = null;
+            Log.d(TAG, "Screen receiver unregistered");
+        }
+    }
+
+    // 4. 订阅息屏事件
+    @org.greenrobot.eventbus.Subscribe(threadMode = org.greenrobot.eventbus.ThreadMode.BACKGROUND)
+    public void onScreenOffEvent(ScreenOffEvent event) {
+        if (event.isScreenOff()) {
+            Log.d(TAG, "Screen is off, take appropriate actions");
+            // 这里可以添加息屏时的业务逻辑
+        } else {
+            Log.d(TAG, "Screen is on, resume normal operations");
+            // 这里可以添加亮屏时的业务逻辑
+        }
     }
 }
