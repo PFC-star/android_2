@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -38,6 +39,7 @@ import com.example.distribute_ui.ui.InferenceViewModel
 import com.example.distribute_ui.ui.components.SplashScreen
 import com.example.distribute_ui.ui.theme.Distributed_inference_demoTheme
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
+import org.greenrobot.eventbus.EventBus
 
 
 const val TAG = "StarDust"
@@ -204,6 +206,14 @@ class SelectionActivity : ComponentActivity(), LatencyMeasurementCallbacks {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onLatencyMeasured(latency: Double) {   // 用latency更新viewModel的延迟数据
         viewModel.updateLatency(latency)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        val isScreenOn = pm.isInteractive // 兼容API 20+
+        EventBus.getDefault().post(com.example.distribute_ui.service.BackgroundService.ScreenOffEvent(!isScreenOn))
+        android.util.Log.d("ScreenDetect", "onWindowFocusChanged: hasFocus=$hasFocus, isScreenOn=$isScreenOn")
     }
 
     companion object {

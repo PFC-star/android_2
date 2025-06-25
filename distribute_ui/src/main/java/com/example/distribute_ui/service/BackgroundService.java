@@ -53,7 +53,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private final boolean running_classification = false;   // 是否为分类任务
     private boolean shouldStartInference = false;   // 是否开始推理
     public static boolean runningStatus = false;          // 是否为运行状态
-    private boolean messageStatus = false;          // 是否收到消息
+    public static boolean isScreenOff = false;          // 是否收到消息
     public static boolean isServiceRunning = false; // 服务是否正在运行
     private boolean isAppInBackground = false; // APP是否在后台
     private Thread backgroundCheckThread = null; // 后台检测线程
@@ -74,7 +74,6 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
     // 2. 在 BackgroundService 中添加广播接收器相关成员
     private android.content.BroadcastReceiver screenReceiver = null;
-    private boolean isScreenOff = false;
 
     /**
      * 监听RunningStatusEvent事件
@@ -98,9 +97,9 @@ public class BackgroundService extends Service {    // 继承自Service，表明
      */
     @Subscribe(threadMode = ThreadMode.BACKGROUND)
     public void onMessageSentEvent(Events.messageSentEvent event) {
-        messageStatus = event.messageSent;
+        isScreenOff = event.messageSent;
         messageContent = event.messageContent;
-        System.out.println("messageSent Status is: " + messageStatus);
+        System.out.println("messageSent Status is: " + isScreenOff);
         System.out.println("message Content is: " + messageContent);
     }
 
@@ -349,7 +348,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
                 // 4.4.1 Receive userinput from chatscreen and save it to test_input array
                 // 等待直到用户按下send按钮->发送事件messageSentEvent->messageStatus=true
-                while (!messageStatus) {
+                while (!isScreenOff) {
                     try {
                         Thread.sleep(1000); // Sleep for a short duration to avoid busy waiting
                     } catch (InterruptedException e) {

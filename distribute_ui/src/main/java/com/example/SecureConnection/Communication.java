@@ -203,22 +203,30 @@ public class Communication {
                         // 检查APP是否在后台
                         Events.GetBackgroundStatusEvent statusEvent = new Events.GetBackgroundStatusEvent();
                         EventBus.getDefault().post(statusEvent);
-                        
-//                        // 根据后台状态发送不同的心跳消息
-//                        if (statusEvent.isInBackground()) {
-//                            // APP在后台，发送特殊心跳
-//                            rootSocket.sendMore("APP_BACKGROUND");
-//                            rootSocket.send("");
-//                            Log.d(TAG, "Heartbeat sent with action APP_BACKGROUND");
-//                        } else {
-//                            // APP在前台，发送普通心跳
-//                            rootSocket.sendMore("HEARTBEAT");
-//                            rootSocket.send("");
-//                            Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
-//                        }
-                        rootSocket.sendMore("HEARTBEAT");
-                        rootSocket.send("");
-                        Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+                        boolean isInBackground = statusEvent.isInBackground();
+                        // 新增：获取息屏状态
+                        boolean isScreenOff = false;
+                        try {
+                            java.lang.reflect.Constructor<?> cons = Class.forName("com.example.distribute_ui.service.BackgroundService$ScreenOffEvent").getDeclaredConstructor(boolean.class);
+                            cons.setAccessible(true);
+                            Object screenEvent = cons.newInstance(false); // 占位实例
+                            // 通过 EventBus sticky 事件或全局变量获取最新息屏状态（如有实现）
+                            // 这里假设有全局静态变量 BackgroundService.isScreenOff
+                            isScreenOff = com.example.distribute_ui.service.BackgroundService.isScreenOff;
+                        } catch (Exception e) {
+                            // 若无法获取，默认false
+                        }
+                        if (isInBackground && !isScreenOff) {
+                            // 故障模式：后台+亮屏
+                            rootSocket.sendMore("FAULT_HEARTBEAT");
+                            rootSocket.send("");
+                            Log.d(TAG, "Heartbeat sent with action FAULT_HEARTBEAT (background+screenOn)");
+                        } else {
+                            // 正常模式
+                            rootSocket.sendMore("HEARTBEAT");
+                            rootSocket.send("");
+                            Log.d(TAG, "Heartbeat sent with action HEARTBEAT");
+                        }
 
                         // 接收心跳响应
                         String response = new String(rootSocket.recv(0));
