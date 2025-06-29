@@ -3,6 +3,7 @@ import static com.example.distribute_ui.service.BackgroundService.TAG;
 
 import android.content.Context;
 import android.util.Log;
+import android.content.Intent;
 
 import org.json.JSONException;
 
@@ -113,6 +114,35 @@ public class Communication {
     // 1. 在 Communication 类中添加静态线程安全的故障时间表：
     private static final java.util.concurrent.ConcurrentHashMap<String, Long> faultStartTimes = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // 1. 在 Communication 类成员区添加：
+    private boolean lastIsFaultMode = false;
+    private void restartBackgroundServiceWithLastParams() {
+        try {
+            // 用 Communication.this.conText 作为 Application Context
+            Context appContext = this.conText != null ? this.conText.getApplicationContext() : null;
+            if (appContext == null) {
+                Log.e(TAG, "No valid application context for restarting service");
+                return;
+            }
+            android.content.SharedPreferences prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE);
+            int role = prefs.getInt("role", 0);
+            String model = prefs.getString("model", "");
+            String ip = prefs.getString("ip", "");
+            // 先 stopService
+            Intent stopIntent = new Intent(appContext, com.example.distribute_ui.service.BackgroundService.class);
+            appContext.stopService(stopIntent);
+            // 再 startService，带上原参数
+            Intent startIntent = new Intent(appContext, com.example.distribute_ui.service.BackgroundService.class);
+            startIntent.putExtra("role", role);
+            startIntent.putExtra("model", model);
+            startIntent.putExtra("ip", ip);
+            appContext.startService(startIntent);
+            Log.d(TAG, "BackgroundService restarted with last params: role=" + role + ", model=" + model + ", ip=" + ip);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to restart BackgroundService: " + e.getMessage());
+        }
+    }
+
     public Communication(Config cfg, Context conText, String modelName, int role) {
         Communication.sessions = new ArrayList<>();
         Communication.LB_Pause = new LBPause();
@@ -198,6 +228,9 @@ public class Communication {
                 // 注册时使用的是"RegisterIP"，心跳检测使用"HEARTBEAT"
                 Log.d(TAG, "Heartbeat thread started, using existing socket connection");
                 
+                // 1. 在心跳检测线程循环外定义
+                boolean lastIsFaultMode = false;
+                
                 while (isHeartbeatRunning) {
                     try {
                         // 检查APP是否在后台
@@ -218,7 +251,8 @@ public class Communication {
                         }
                         if (isInBackground && !isScreenOff) {
                             // 故障模式：后台+亮屏
-                            rootSocket.sendMore("FAULT_HEARTBEAT");
+//                            rootSocket.sendMore("FAULT_HEARTBEAT");
+                            rootSocket.sendMore("HEARTBEAT");
                             rootSocket.send("");
                             Log.d(TAG, "Heartbeat sent with action FAULT_HEARTBEAT (background+screenOn)");
                         } else {
@@ -255,6 +289,15 @@ public class Communication {
                         
                         // 心跳间隔，建议低于服务器超时阈值的一半
                         Thread.sleep(1000); // 1秒发送一次心跳
+
+                         
+                        // 检查系统状态是否从恢复状态转变为运行状态
+                        boolean isFaultMode = isInBackground && !isScreenOff;
+                        if (Communication.this.lastIsFaultMode && !isFaultMode) {
+                            Log.d(TAG, "Switch from FAULT to NORMAL, restarting BackgroundService...");
+                            Communication.this.restartBackgroundServiceWithLastParams();
+                        }
+                        Communication.this.lastIsFaultMode = isFaultMode;
                     } catch (Exception e) {
                         Log.e(TAG, "心跳循环出错: " + e.getMessage());
                         // 心跳发送失败，短暂等待后重试

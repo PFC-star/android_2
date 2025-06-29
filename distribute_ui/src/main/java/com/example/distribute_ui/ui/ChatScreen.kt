@@ -115,7 +115,78 @@ fun ChatScreen(
         "What causes climate change?",
         "How do vaccines work?",
         "What is blockchain technology?",
-        "Explain the water cycle"
+        "Explain the water cycle",
+        "who are you?",
+        "What is your name?",
+        "What is your age?",
+        "What is your gender?",
+        "What is your occupation?",
+        "What is your education?",
+        "What is your nationality?",
+        "What is your religion?",
+        "What is your political views?",
+        "What is your favorite color?",
+        "What is your favorite food?",
+        "What is your favorite movie?",
+        "What is your favorite book?",
+        "What is your favorite sport?",
+        "What is your favorite TV show?",
+        "What is your favorite celebrity?",
+        "What is your favorite quote?",
+        "What is your favorite saying?",
+        "Do you have any pets?",
+        "Do you have any siblings?",
+        "How much of your time do you spend on social media?",
+        "What is the capital of Japan?",
+        "Explain the concept of artificial intelligence",
+        "Why do we dream at night?",
+        "How does a car engine work?",
+        "What are the effects of sleep deprivation?",
+        "Explain gravity in simple terms",
+        "What is the internet of things?",
+        "How does a refrigerator keep food cold?",
+        "What is the purpose of life?",
+        "What causes earthquakes?",
+        "Explain how airplanes fly",
+        "What is the difference between weather and climate?",
+        "How does a battery store energy?",
+        "What is the function of DNA?",
+        "Explain how a computer works",
+        "What is cryptocurrency?",
+        "What are the benefits of meditation?",
+        "How does a smartphone recognize touch?",
+        "What is the big bang theory?",
+        "What is the role of the United Nations?",
+        "How do birds migrate long distances?",
+        "What is the importance of biodiversity?",
+        "Explain the process of digestion",
+        "What is the greenhouse effect?",
+        "How do stars produce light?",
+        "What is the function of the human brain?",
+        "Explain how a solar panel generates electricity",
+        "What is the history of the internet?",
+        "What is the meaning of happiness?",
+        "How does sound travel through air?",
+        "What is the significance of democracy?",
+        "What is the impact of deforestation?",
+        "How do vaccines prevent diseases?",
+        "What is the difference between speed and velocity?",
+        "Explain how a wind turbine works",
+        "What is the role of bees in ecosystems?",
+        "What is the meaning of success?",
+        "How does memory work in the brain?",
+        "What is the importance of clean water?",
+        "What is the future of renewable energy?",
+        "How do plants respond to light?",
+        "What is the function of the heart?",
+        "Explain the concept of time zones",
+        "What is the purpose of dreams?",
+        "How does a microwave oven heat food?",
+        "What is the significance of education?",
+        "What is the difference between a virus and bacteria?",
+        "How does language shape thought?",
+        "What is the importance of space exploration?",
+        "Explain the concept of globalization",
     )
 
     // 自动输入相关状态
@@ -161,12 +232,15 @@ fun ChatScreen(
         Log.d(TAG, "[UIAutoInput] 自动输入检查: shouldAutoInput=$shouldAutoInput")
         
         if (shouldAutoInput) {
-            // 准备下一轮输入
-            nextPrompt = predefinedPrompts[currentPromptIndex]
-            currentPromptIndex = (currentPromptIndex + 1) % predefinedPrompts.size
+            // 随机选择下一轮输入
+            val randomIndex = (predefinedPrompts.indices).random()
+            nextPrompt = predefinedPrompts[randomIndex]
+            // currentPromptIndex = (currentPromptIndex + 1) % predefinedPrompts.size // 不再顺序递增
             
-            // 延迟一小段时间模拟用户思考
-            kotlinx.coroutines.delay(500)
+            // 延迟一段10s~1min的随机时间模拟用户思考
+            val randomDelayMillis = (35_000..300_000).random()
+            //val randomDelayMillis = (1_000..6_000).random()
+            kotlinx.coroutines.delay(randomDelayMillis.toLong())
             
             if (isFirstRound) {
                 // 第一轮直接发送

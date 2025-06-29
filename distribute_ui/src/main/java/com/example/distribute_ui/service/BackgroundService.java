@@ -44,6 +44,14 @@ import java.util.concurrent.Executors;
 import java.util.Properties;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import org.zeromq.SocketType;
+import org.zeromq.ZContext;
+import org.zeromq.ZMQ;
 
 public class BackgroundService extends Service {    // 继承自Service，表明为一个服务
     public static double[] results;                 // 存储推理结果
@@ -74,6 +82,12 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
     // 2. 在 BackgroundService 中添加广播接收器相关成员
     private android.content.BroadcastReceiver screenReceiver = null;
+
+    // === 全局成员变量 ===
+    private String serverIP = "";
+    private String deviceIP = "";
+    private ZMQ.Socket logSocket = null;
+    private ZContext zmqContext = null;
 
     /**
      * 监听RunningStatusEvent事件
@@ -117,23 +131,40 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     }
 
     /**
-     * 从配置文件中获取服务器IP地址
-     * 
+     * 获取服务器IP地址，优先级：Intent extra > Config类 > config.properties
+     * @param intent 启动服务的Intent，可为null
      * @return 服务器IP地址字符串
      */
-    private String getServerIPAddress() {
-        String serverIP = "";
+    private String getServerIPAddress(Intent intent) {
+        String serverIP = null;
+        // 1. 优先从Intent extra获取
+        if (intent != null && intent.hasExtra("ip")) {
+            serverIP = intent.getStringExtra("ip");
+            if (serverIP != null && !serverIP.isEmpty()) {
+                return serverIP;
+            }
+        }
+        // 2. 其次用Config.root
+        try {
+            Class<?> configClass = Class.forName("com.example.SecureConnection.Config");
+            serverIP = (String) configClass.getField("root").get(null);
+            if (serverIP != null && !serverIP.isEmpty()) {
+                return serverIP;
+            }
+        } catch (Exception e) {
+            // 忽略，进入下一个兜底
+        }
+        // 3. 最后兜底config.properties
         Properties properties = new Properties();
         try {
             InputStream inputStream = getAssets().open("config.properties");
             properties.load(inputStream);
             serverIP = properties.getProperty("server_ip");
             inputStream.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-            // Handle the exception
+        } catch (IOException ioException) {
+            ioException.printStackTrace();
         }
-        return serverIP;
+        return serverIP != null ? serverIP : "";
     }
 
     /**
@@ -203,15 +234,44 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             System.out.println("model name is: "+ modelName);
         }
 
-        // 获取服务器IP
-        String server_ip;
+        // 获取服务器IP，优先级：Intent > Config > config.properties
+        serverIP = null;
         if (intent != null && intent.hasExtra("ip")) {
-            server_ip = intent.getStringExtra("ip");
-            System.out.println("root ip: "+ server_ip);
-        } else {
-            server_ip = "";
+            serverIP = intent.getStringExtra("ip");
         }
+        if (serverIP == null || serverIP.isEmpty()) {
+            try {
+                Class<?> configClass = Class.forName("com.example.SecureConnection.Config");
+                serverIP = (String) configClass.getField("root").get(null);
+            } catch (Exception e) {
+                // 忽略，进入下一个兜底
+            }
+        }
+        if (serverIP == null || serverIP.isEmpty()) {
+            Properties properties = new Properties();
+            try {
+                InputStream inputStream = getAssets().open("config.properties");
+                properties.load(inputStream);
+                serverIP = properties.getProperty("server_ip");
+                inputStream.close();
+            } catch (IOException ioException) {
+                ioException.printStackTrace();
+            }
+        }
+        if (serverIP == null) serverIP = "";
+        System.out.println("root ip: "+ serverIP);
 
+        deviceIP = Config.local;
+
+
+        // === 新增：保存参数到 SharedPreferences ===
+        android.content.SharedPreferences prefs = getApplicationContext().getSharedPreferences("app_prefs", Context.MODE_PRIVATE);
+        android.content.SharedPreferences.Editor editor = prefs.edit();
+        editor.putInt("role", id);
+        editor.putString("model", modelName);
+        editor.putString("ip", serverIP);
+        editor.putString("device_ip", deviceIP);
+        editor.apply();
         // 创建一个单线程的线程池，池中的所有任务按顺序执行，每次最多只有一个正在执行的任务
         // 通过将任务提交给线程池执行，当前线程可以继续执行其他操作而不被阻塞，线程池会自动管理工作线程的生命周期
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -221,7 +281,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             // k为top-k采样的参数
             // initial_temp为temperature参数
             // 实例化一个配置类，服务器地址为server_ip:23456，top-k采样，此外还包括自身ip:端口号
-            Config cfg = new Config(server_ip, 23456, 7, 0.7f);
+            Config cfg = new Config(serverIP, 23456, 7, 0.7f);
 
             Communication com = new Communication(cfg, this, finalModelName, id); // 根据配置cfg实例化一个Communication
             Communication.loadBalance = new LoadBalance(com, cfg);  // 根据com和cfg实例化一个LoadBalance
@@ -465,6 +525,17 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             return null;
         });
 
+        // 初始化ZeroMQ日志socket
+        if (zmqContext == null) {
+            zmqContext = new ZContext();
+        }
+        if (logSocket == null) {
+            logSocket = zmqContext.createSocket(SocketType.DEALER);
+            String connectStr = "tcp://" + serverIP + ":9889";
+            logSocket.connect(connectStr);
+            Log.d(TAG, "Log socket connected to " + connectStr);
+        }
+
         return START_STICKY; // 如果系统杀死服务，会尝试重新启动并恢复Intent
     }
 
@@ -634,18 +705,55 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
     // 获取电量百分比
     private int getBatteryLevel() {
-        // 伪实现，实际可用BatteryManager
-        return 80;
+        android.os.BatteryManager bm = (android.os.BatteryManager) getSystemService(BATTERY_SERVICE);
+        if (bm != null) {
+            int level = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY);
+            return level; // 0-100
+        }
+        return -1; // 获取失败
     }
-    // 获取CPU占用率
+    // 获取CPU占用率（系统整体）
     private double getCpuUsage() {
-        // 伪实现，实际可用 /proc/stat 或系统API
-        return 0.25;
+        // Android 10+ 无法访问 /proc/stat，直接返回 0.0
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            Log.w(TAG, "getCpuUsage: 当前系统不支持采集CPU占用率，返回0.0");
+            return 0.0;
+        }
+        try {
+            java.io.RandomAccessFile reader = new java.io.RandomAccessFile("/proc/stat", "r");
+            String load = reader.readLine();
+            String[] toks = load.split(" +"); // 多个空格分割
+            long idle1 = Long.parseLong(toks[4]);
+            long cpu1 = 0;
+            for (int i = 1; i < 8; i++) {
+                cpu1 += Long.parseLong(toks[i]);
+            }
+            Thread.sleep(360);
+            reader.seek(0);
+            load = reader.readLine();
+            reader.close();
+            toks = load.split(" +");
+            long idle2 = Long.parseLong(toks[4]);
+            long cpu2 = 0;
+            for (int i = 1; i < 8; i++) {
+                cpu2 += Long.parseLong(toks[i]);
+            }
+            return (double) (cpu2 - cpu1 - (idle2 - idle1)) / (cpu2 - cpu1);
+        } catch (Exception e) {
+            Log.w(TAG, "getCpuUsage: 采集失败，返回0.0");
+            return 0.0;
+        }
     }
-    // 获取设备温度
+    // 获取设备温度（电池温度）
     private double getDeviceTemperature() {
-        // 伪实现，实际可用传感器API
-        return 36.5;
+        android.content.Intent intent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (intent != null) {
+            int temp = intent.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, -1);
+            if (temp != -1) {
+                return temp / 10.0; // 单位是 0.1°C
+            }
+        }
+        return -1;
     }
 
     // 监听SessionLogEvent
@@ -669,26 +777,49 @@ public class BackgroundService extends Service {    // 继承自Service，表明
               .append("\n tokens:").append(q.tokens)
               .append(", throughput:").append(q.throughput);
             // 打印每个token的详细阶段时间戳
-            int tokenCount = q.clientReceiveTimes != null ? q.clientReceiveTimes.size() : 0;
+            int tokenCount = Math.max(
+                Math.max(
+                    q.clientReceiveTimes != null ? q.clientReceiveTimes.size() : 0,
+                    q.inferenceTimes != null ? q.inferenceTimes.size() : 0
+                ),
+                Math.max(
+                    q.serverSendTimes != null ? q.serverSendTimes.size() : 0,
+                    q.tailerResultTimes != null ? q.tailerResultTimes.size() : 0
+                )
+            );
             sb.append("\n[TokenStageTimes] count:").append(tokenCount);
             for (int i = 0; i < tokenCount; i++) {
-                sb.append("\n  token[").append(i).append("] ");
+                StringBuilder sbToken = new StringBuilder();
+                sbToken.append("token[").append(i).append("] ");
+                // clientReceive
                 if (q.clientReceiveTimes != null && i < q.clientReceiveTimes.size()) {
                     long[] t = q.clientReceiveTimes.get(i);
-                    sb.append("clientReceive:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                    sbToken.append("clientReceive:")
+                        .append(sdf.format(new Date(t[0]))).append("-")
+                        .append(sdf.format(new Date(t[1]))).append(", ");
                 }
+                // inference
                 if (q.inferenceTimes != null && i < q.inferenceTimes.size()) {
                     long[] t = q.inferenceTimes.get(i);
-                    sb.append("inference:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                    sbToken.append("inference:")
+                        .append(sdf.format(new Date(t[0]))).append("-")
+                        .append(sdf.format(new Date(t[1]))).append(", ");
                 }
+                // serverSend
                 if (q.serverSendTimes != null && i < q.serverSendTimes.size()) {
                     long[] t = q.serverSendTimes.get(i);
-                    sb.append("serverSend:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1]))).append(", ");
+                    sbToken.append("serverSend:")
+                        .append(sdf.format(new Date(t[0]))).append("-")
+                        .append(sdf.format(new Date(t[1]))).append(", ");
                 }
+                // tailerResult
                 if (q.tailerResultTimes != null && i < q.tailerResultTimes.size()) {
                     long[] t = q.tailerResultTimes.get(i);
-                    sb.append("tailerResult:").append(sdf.format(new Date(t[0]))).append("-").append(sdf.format(new Date(t[1])));
+                    sbToken.append("tailerResult:")
+                        .append(sdf.format(new Date(t[0]))).append("-")
+                        .append(sdf.format(new Date(t[1])));
                 }
+                sb.append(sbToken.toString());
             }
             // 打印 FaultEvent
             sb.append("\n[FaultEvents] count:").append(sessionLog.faultEvents.size());
@@ -708,10 +839,116 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             }
             sb.append("\n========================");
             Log.d(TAG, sb.toString());
+
+            // 新增：将日志以JSON格式发送到Python服务端（ZeroMQ方式）
+            try {
+                JSONObject json = new JSONObject();
+                // 设备IP
+                json.put("deviceIP", deviceIP != null ? deviceIP :Config.local);
+
+                // QueryLogEvent
+                JSONObject queryLogJson = new JSONObject();
+                queryLogJson.put("queryId", q.queryId);
+                queryLogJson.put("userQuery", q.userQuery);
+                queryLogJson.put("response", q.response);
+                queryLogJson.put("tokens", q.tokens);
+                queryLogJson.put("throughput", q.throughput);
+                // token阶段时间戳（全部转为字符串并合并为一行）
+                JSONArray tokenStageTimes = new JSONArray();
+                tokenCount = Math.max(
+                    Math.max(
+                        q.clientReceiveTimes != null ? q.clientReceiveTimes.size() : 0,
+                        q.inferenceTimes != null ? q.inferenceTimes.size() : 0
+                    ),
+                    Math.max(
+                        q.serverSendTimes != null ? q.serverSendTimes.size() : 0,
+                        q.tailerResultTimes != null ? q.tailerResultTimes.size() : 0
+                    )
+                );
+                for (int i = 0; i < tokenCount; i++) {
+                    StringBuilder sbToken = new StringBuilder();
+                    sbToken.append("token[").append(i).append("] ");
+                    // clientReceive
+                    if (q.clientReceiveTimes != null && i < q.clientReceiveTimes.size()) {
+                        long[] t = q.clientReceiveTimes.get(i);
+                        sbToken.append("clientReceive:")
+                            .append(sdf.format(new Date(t[0]))).append("-")
+                            .append(sdf.format(new Date(t[1]))).append(", ");
+                    }
+                    // inference
+                    if (q.inferenceTimes != null && i < q.inferenceTimes.size()) {
+                        long[] t = q.inferenceTimes.get(i);
+                        sbToken.append("inference:")
+                            .append(sdf.format(new Date(t[0]))).append("-")
+                            .append(sdf.format(new Date(t[1]))).append(", ");
+                    }
+                    // serverSend
+                    if (q.serverSendTimes != null && i < q.serverSendTimes.size()) {
+                        long[] t = q.serverSendTimes.get(i);
+                        sbToken.append("serverSend:")
+                            .append(sdf.format(new Date(t[0]))).append("-")
+                            .append(sdf.format(new Date(t[1]))).append(", ");
+                    }
+                    // tailerResult
+                    if (q.tailerResultTimes != null && i < q.tailerResultTimes.size()) {
+                        long[] t = q.tailerResultTimes.get(i);
+                        sbToken.append("tailerResult:")
+                            .append(sdf.format(new Date(t[0]))).append("-")
+                            .append(sdf.format(new Date(t[1])));
+                    }
+                    tokenStageTimes.put(sbToken.toString());
+                }
+                queryLogJson.put("tokenStageTimes", tokenStageTimes);
+                json.put("queryLog", queryLogJson);
+                // FaultEvents
+                JSONArray faultEventsJson = new JSONArray();
+                for (com.example.distribute_ui.Events.FaultEvent f : sessionLog.faultEvents) {
+                    JSONObject fJson = new JSONObject();
+                    fJson.put("faultType", f.faultType);
+                    fJson.put("faultTime", f.faultTime);
+                    fJson.put("recoveryTime", f.recoveryTime);
+                    fJson.put("affectedQueryId", f.affectedQueryId);
+                    faultEventsJson.put(fJson);
+                }
+                json.put("faultEvents", faultEventsJson);
+                // EnergyEvents
+                JSONArray energyEventsJson = new JSONArray();
+                for (com.example.distribute_ui.Events.EnergyEvent e : sessionLog.energyEvents) {
+                    JSONObject eJson = new JSONObject();
+                    eJson.put("timestamp", e.timestamp);
+                    eJson.put("battery", e.battery);
+                    eJson.put("cpuUsage", e.cpuUsage);
+                    eJson.put("temperature", e.temperature);
+                    energyEventsJson.put(eJson);
+                }
+                json.put("energyEvents", energyEventsJson);
+
+                // 新增：发送时间段（第一个token和最后一个token的clientReceive[0]时间）
+                String timeSpan = "";
+                if (q.clientReceiveTimes != null && q.clientReceiveTimes.size() > 0) {
+                    long first = q.clientReceiveTimes.get(0)[0];
+                    long last = q.clientReceiveTimes.get(q.clientReceiveTimes.size() - 1)[0];
+                    timeSpan = sdf.format(new Date(first)) + "~" + sdf.format(new Date(last));
+                }
+                json.put("timeSpan", timeSpan);
+
+                // 发送到Python服务端（ZeroMQ方式）
+                if (logSocket == null) {
+                    Log.e(TAG, "Log socket not initialized");
+                    return;
+                }
+                String jsonStr = json.toString();
+                logSocket.send(jsonStr);
+                Log.d(TAG, "Log sent to server via ZeroMQ");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to send log to server: " + e.getMessage());
+            }
         } else {
             Log.d(TAG, "Send log to server: " + logEvent.toString());
         }
     }
+
+
 
     // 3. 注册/注销广播方法
     private void registerScreenReceiver() {
