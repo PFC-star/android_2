@@ -89,6 +89,14 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     private ZMQ.Socket logSocket = null;
     private ZContext zmqContext = null;
 
+    // === 静态成员变量，保存启动参数供Communication.java访问 ===
+    public static Intent lastStartIntent = null;
+    public static int lastStartFlags = 0;
+    public static int lastStartId = 0;
+    public static String lastRole = "";
+    public static String lastModelName = "";
+    public static String lastServerIP = "";
+
     /**
      * 监听RunningStatusEvent事件
      * 当Communication类初始化完成后，会发送此事件
@@ -216,8 +224,18 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {  // flags和startId（用于标识服务，在终止服务时需要）由系统自动传递
         Log.d(TAG, "background service started");
-        int id; // 用于存储intent中的role: Int
-        if (intent != null && intent.hasExtra("role")) {    // 提取Intent中附加的额外信息"role"的值
+        Log.d(TAG, "启动参数 - intent: " + intent + ", flags: " + flags + ", startId: " + startId);
+        //        看一下参数都有什么
+//        然后在另外一个函数中重启
+
+        // 保存启动参数到静态变量的值 
+        lastStartIntent = intent;
+        lastStartFlags = flags;
+        lastStartId = startId;
+        isServiceRunning = true;
+        
+        int id;
+        if (intent != null && intent.hasExtra("role")) {
             id = intent.getIntExtra("role", 0);
         } else {
             id = 0;
@@ -262,7 +280,13 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         System.out.println("root ip: "+ serverIP);
 
         deviceIP = Config.local;
-
+        System.out.println("deviceIP ip: "+ deviceIP);
+        // 保存所有参数到静态变量
+        lastRole = role;
+        lastModelName = modelName;
+        lastServerIP = serverIP;
+        
+        Log.d(TAG, "启动参数已保存 - role: " + lastRole + ", model: " + lastModelName + ", serverIP: " + lastServerIP);
 
         // === 新增：保存参数到 SharedPreferences ===
         android.content.SharedPreferences prefs = getApplicationContext().getSharedPreferences("app_prefs", Context.MODE_PRIVATE);
@@ -562,6 +586,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
         startEnergyMonitor(); // 启动能耗采集
         // 注册息屏/亮屏广播
         registerScreenReceiver();
+        Log.d(TAG, "onCreate");
     }
 
     /**
@@ -572,11 +597,11 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     public void onDestroy() {
         super.onDestroy();
         isServiceRunning = false;
-        stopBackgroundCheck(); // 停止后台检测
-        stopEnergyMonitor(); // 停止能耗采集
-        EventBus.getDefault().unregister(this);  // 取消事件总线监听器
-        // 注销息屏/亮屏广播
-        unregisterScreenReceiver();
+//        stopBackgroundCheck(); // 停止后台检测
+//        stopEnergyMonitor(); // 停止能耗采集
+//        EventBus.getDefault().unregister(this);  // 取消事件总线监听器
+//        // 注销息屏/亮屏广播
+//        unregisterScreenReceiver();
     }
 
     /**

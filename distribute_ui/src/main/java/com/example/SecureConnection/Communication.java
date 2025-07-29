@@ -118,26 +118,105 @@ public class Communication {
     private boolean lastIsFaultMode = false;
     private void restartBackgroundServiceWithLastParams() {
         try {
-            // 用 Communication.this.conText 作为 Application Context
+            Log.d(TAG, "restartBackgroundServiceWithLastParams...");
+
+//           使用之前的参数
+//            先停再启
+            // 1. 停止所有com相关的线程和进程
+            Log.d(TAG, "Stopping all com threads and processes...");
+            
+            // 停止心跳线程
+            if (heartbeatThread != null && heartbeatThread.isAlive()) {
+                isHeartbeatRunning = false;
+                heartbeatThread.interrupt();
+                heartbeatThread = null;
+                Log.d(TAG, "Heartbeat thread stopped");
+            }
+            
+            // 停止executor线程池（包含com.runPrepareThread等）
+            if (executor != null && !executor.isShutdown()) {
+                executor.shutdownNow();
+                try {
+                    if (!executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        Log.w(TAG, "Executor did not terminate in time");
+                    }
+                } catch (InterruptedException e) {
+                    Log.w(TAG, "Executor termination interrupted");
+                }
+                Log.d(TAG, "Executor thread pool stopped");
+            }
+            
+            // 停止pool线程池（包含multiSteps等任务）
+            if (pool != null && !pool.isShutdown()) {
+                pool.shutdownNow();
+                try {
+                    if (!pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        Log.w(TAG, "Pool did not terminate in time");
+                    }
+                } catch (InterruptedException e) {
+                    Log.w(TAG, "Pool termination interrupted");
+                }
+                Log.d(TAG, "Pool thread pool stopped");
+            }
+            
+            // 停止ZMQ相关连接
+            if (rootSocket != null) {
+                rootSocket.close();
+                rootSocket = null;
+                Log.d(TAG, "Root socket closed");
+            }
+            
+            // 重置com状态
+            if (param != null) {
+                param.status = "Stopped";
+            }
+            
+            // 2. 停止BackgroundService
             Context appContext = this.conText != null ? this.conText.getApplicationContext() : null;
             if (appContext == null) {
                 Log.e(TAG, "No valid application context for restarting service");
                 return;
             }
-            android.content.SharedPreferences prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE);
-            int role = prefs.getInt("role", 0);
-            String model = prefs.getString("model", "");
-            String ip = prefs.getString("ip", "");
-            // 先 stopService
+            
             Intent stopIntent = new Intent(appContext, com.example.distribute_ui.service.BackgroundService.class);
             appContext.stopService(stopIntent);
-            // 再 startService，带上原参数
+            Log.d(TAG, "BackgroundService stopped");
+            
+            // 等待服务完全停止
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Log.w(TAG, "Sleep interrupted while waiting for service to stop");
+            }
+            
+            // 3. 使用保存的参数重新启动服务
+            Log.d(TAG, "Restarting BackgroundService with saved parameters...");
+            
+            // 使用BackgroundService中保存的静态参数
             Intent startIntent = new Intent(appContext, com.example.distribute_ui.service.BackgroundService.class);
-            startIntent.putExtra("role", role);
-            startIntent.putExtra("model", model);
-            startIntent.putExtra("ip", ip);
+            
+            // 从静态变量获取参数
+            if (com.example.distribute_ui.service.BackgroundService.lastStartIntent != null) {
+                // 直接使用保存的Intent
+                startIntent = com.example.distribute_ui.service.BackgroundService.lastStartIntent;
+                Log.d(TAG, "Using saved Intent for restart");
+            } else {
+                // 兜底：从SharedPreferences获取
+                android.content.SharedPreferences prefs = appContext.getSharedPreferences("app_prefs", Context.MODE_PRIVATE);
+                int role = prefs.getInt("role", 0);
+                String model = prefs.getString("model", "");
+                String ip = prefs.getString("ip", "");
+                
+                startIntent.putExtra("role", role);
+                startIntent.putExtra("model", model);
+                startIntent.putExtra("ip", ip);
+                Log.d(TAG, "Using SharedPreferences params for restart: role=" + role + ", model=" + model + ", ip=" + ip);
+            }
+            
             appContext.startService(startIntent);
-            Log.d(TAG, "BackgroundService restarted with last params: role=" + role + ", model=" + model + ", ip=" + ip);
+            Log.d(TAG, "BackgroundService restarted successfully");
+           
+
         } catch (Exception e) {
             Log.e(TAG, "Failed to restart BackgroundService: " + e.getMessage());
         }
@@ -251,8 +330,8 @@ public class Communication {
                         }
                         if (isInBackground && !isScreenOff) {
                             // 故障模式：后台+亮屏
-//                            rootSocket.sendMore("FAULT_HEARTBEAT");
-                            rootSocket.sendMore("HEARTBEAT");
+                            rootSocket.sendMore("HEARTBEAT_InBackground_ScreenOn");
+//                            rootSocket.sendMore("HEARTBEAT");
                             rootSocket.send("");
                             Log.d(TAG, "Heartbeat sent with action FAULT_HEARTBEAT (background+screenOn)");
                         } else {
@@ -285,8 +364,22 @@ public class Communication {
                                 
                                 Log.w(TAG, "状态已设置为 Recovery, 通信线程将处理恢复");
                             }
+
+                            else if ("SYSTEM_InBackground_ScreenOn".equals(systemStatus) &&
+                                    !"Recovery".equals(param.status) &&
+                                    !"Recovering".equals(param.status)) {
+
+                                Log.d(TAG, "Heartbeat receive with action FAULT_HEARTBEAT (background+screenOn)");
+
+                                // 设置状态为Recovery，Client.communicationOpenClose会检测到此状态变化并处理
+                                synchronized (param) {
+                                    param.status = "WaitRestarting";
+                                }
+
+                                Log.w(TAG, "状态已设置为 Restarting, 正在进行重新启动");
+                            }
                         }
-                        
+
                         // 心跳间隔，建议低于服务器超时阈值的一半
                         Thread.sleep(1000); // 1秒发送一次心跳
 
@@ -295,6 +388,9 @@ public class Communication {
                         boolean isFaultMode = isInBackground && !isScreenOff;
                         if (Communication.this.lastIsFaultMode && !isFaultMode) {
                             Log.d(TAG, "Switch from FAULT to NORMAL, restarting BackgroundService...");
+                            synchronized (param) {
+                                param.status = "Restarting";
+                            }
                             Communication.this.restartBackgroundServiceWithLastParams();
                         }
                         Communication.this.lastIsFaultMode = isFaultMode;
