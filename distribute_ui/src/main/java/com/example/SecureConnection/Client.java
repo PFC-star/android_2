@@ -65,7 +65,13 @@ public class Client {
     }
     
     private Context conText;
-    
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b & 0xFF));
+        }
+        return sb.toString();
+    }
     /**
      * 主通信处理函数 - 工作设备模式
      * 负责与服务器的通信循环，处理设备的状态转换和故障恢复
@@ -83,6 +89,7 @@ public class Client {
      * @param role 设备角色
      * @throws Exception 通信过程中可能发生的异常
      */
+
     public void communicationOpenClose(Config cfg, Communication com, Socket receiver, String modelName, String serverIp, int role) throws Exception {
         Log.d(TAG, "Start communicationOpenClose");
         Communication.Params param = com.param;
@@ -96,6 +103,7 @@ public class Client {
                 Log.d(TAG, "waiting for open signal");
 
                 // Open
+
                 String msg = new String(receiver.recv(0));
                 Log.d(TAG, "msg: " + msg);
                 if (msg.equals("Open")) {   // 收到msg为"Open"时，修改status，进行一系列准备工作
@@ -142,9 +150,15 @@ public class Client {
                 param.status = "Initialized";
                 System.out.println("Status: Initialized");
                 receiver.send("Initialized", 0);
+//                byte[] idFrame = receiver.recv(0);  // 忽略ID
+//                System.out.println("idFrame hex:" + bytesToHex(idFrame));
+//
+//
+//                byte[] msgBytes = receiver.recv(0);  // "Start"
+//                System.out.println(new String(msgBytes));
 
                 msg = new String(receiver.recv(0));
-                System.out.println(msg);
+                System.out.println("Start msg:" + msg);
 
                 if (msg.equals("Start")) {
                     param.status = "Start";

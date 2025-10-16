@@ -559,7 +559,48 @@ public class Communication {
             beClient.communicationOpenCloseActive(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
         }
         else if (param.equals("working")){
-            commuSocket  = beClient.establish_connection(context, SocketType.DEALER, 34567,cfg.root); // 与服务器建立连接
+            // connect commuSocket
+            Socket commuSocket = beClient.establish_connection(context, SocketType.DEALER, 34568, cfg.root);
+
+// send注册（首次无identity，临时ID OK）
+            // send注册（临时ID OK）
+            commuSocket.sendMore("RegisterGroupID");
+            commuSocket.send(Config.local.getBytes(), 0);
+
+// recv分配
+            String regMsg = new String(commuSocket.recv(0));
+            if (regMsg.equals("GROUP_ASSIGNED")) {
+                byte[] groupIdBytes = commuSocket.recv(0);
+                String groupId = new String(groupIdBytes);
+                Log.d(TAG, "Recv group_id: " + groupId);
+
+                // IP String转bytes (4)
+                String localIpStr = Config.local;
+                byte[] localIpBytes = new byte[4];
+                String[] ipParts = localIpStr.split("\\.");
+                for (int i = 0; i < 4; i++) {
+                    localIpBytes[i] = (byte) Integer.parseInt(ipParts[i]);
+                }
+                Log.d(TAG, "Local IP bytes: " + Arrays.toString(localIpBytes));
+
+                // identity = groupIdBytes (8) + localIpBytes (4)
+                byte[] identity = new byte[groupIdBytes.length + localIpBytes.length];
+                System.arraycopy(groupIdBytes, 0, identity, 0, groupIdBytes.length);
+                System.arraycopy(localIpBytes, 0, identity, groupIdBytes.length, localIpBytes.length);
+                Log.d(TAG, "New identity length: " + identity.length + ", content: " + Arrays.toString(identity));
+
+                // 重连生效
+                commuSocket.disconnect("tcp://" + cfg.root + ":34568");  // 断开
+                commuSocket.setIdentity(identity);  // 现在设
+                commuSocket.connect("tcp://" + cfg.root + ":34568");  // 重连
+                Thread.sleep(500);  // 0.5s等握手
+
+                // 验证生效
+                byte[] currentId = commuSocket.getIdentity();
+                Log.d(TAG, "Current identity after reconnect: " + Arrays.toString(currentId) + " (should match new)");
+            }
+
+// 进入循环，send "Ready" (带新identity)
             beClient.communicationOpenClose(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
         }
         // 执行Client类的communicationOpenClose方法

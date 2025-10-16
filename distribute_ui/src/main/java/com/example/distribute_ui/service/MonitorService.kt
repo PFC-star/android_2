@@ -135,7 +135,7 @@ class MonitorService : Service(), MonitorActions{   // 继承自Service与一个
 
     private fun startMonitorThread() {
         // 创建套接字与服务器的34567号端口建立连接
-        val monitorConfig = Config(serverIPAddress, 34567)
+        val monitorConfig = Config(serverIPAddress, 34568)
         currentIP = Config.local
         Log.d(mTAG, "current IP address is $currentIP")
         val monitorContext = ZContext()
