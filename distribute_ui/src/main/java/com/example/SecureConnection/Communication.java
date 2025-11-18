@@ -1706,7 +1706,7 @@ public class Communication {
 
             for (Integer idx : sendDeviceIndex) {
 
-                int portNum = Config.port + j * i + (idx - cfg.deviceId);
+                int portNum = basePortNum + j * i + (idx - cfg.deviceId);
                 int maxRetries = 10;
                 for (int retry = 0; retry < maxRetries; retry++) {
                     try {
@@ -1730,7 +1730,7 @@ public class Communication {
             // 如果当前节点是尾节点，需要额外创建与头节点通信的Socket
             if (cfg.isTailer()){
                 try {
-                    int portNum = Config.port + j*i + 1;
+                    int portNum =basePortNum + j*i + 1;
                     Log.d(TAG, "尾节点创建额外Socket至头节点, 端口: " + portNum);
                     Socket temp = beServer.establish_connection(context, SocketType.ROUTER, 
                             portNum);  // 使用特定端口
@@ -1754,7 +1754,7 @@ public class Communication {
             Map<Integer, Socket> receiveSocket = new HashMap<>();
             for (Integer idx : receiveDeviceIndex) {  // 遍历需要接收数据的设备索引
                 try {
-                    int portNum = Config.port + j*i + (cfg.deviceId-idx);
+                    int portNum =basePortNum + j*i + (cfg.deviceId-idx);
                     String targetIP = cfg.ipGraph[idx];
                     Log.d(TAG, "尝试创建接收Socket从设备: " + idx + ", IP: " + targetIP + 
                           ", 端口: " + portNum);
