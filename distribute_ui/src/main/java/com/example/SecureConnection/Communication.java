@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -279,8 +280,9 @@ public class Communication {
 
         // 启动心跳检测线程
         startHeartbeatDetection();
-
-        return msg_;
+        String monitor_port = new String(rootSocket.recv(0), StandardCharsets.UTF_8);
+        Log.d(TAG, "monitor_port: " + monitor_port);
+        return monitor_port;
     }
 
     private volatile boolean isHeartbeatRunning = true;
@@ -522,6 +524,7 @@ public class Communication {
         executor.submit(()-> {  // 提交任务到线程池
             try {
                 this.prepare(param); // 运行Communication类的prepare方法
+                this.alignIP(param);
             } catch (Exception e) { // 如果 prepare() 方法抛出异常，抛出一个运行时异常
                 Log.e(TAG, "Error: " + e.getMessage());
                 throw new RuntimeException(e);
@@ -547,8 +550,9 @@ public class Communication {
     public void prepare(String param) throws Exception {
         long startTime = System.nanoTime(); // 记录开始时间
         // Communicate with Root Root Server
-        Log.d(TAG, "root IP: " + cfg.root +  " ,root port: " + cfg.rootPort);
 
+        Config.port = Integer.parseInt(param);
+        Log.d(TAG, "root IP: " + cfg.root +  " ,root port: " + Config.port);
         if (param.equals("active")){
 
                 Config.port=10000;
@@ -604,11 +608,96 @@ public class Communication {
             beClient.communicationOpenClose(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
         }
         // 执行Client类的communicationOpenClose方法
+        else{
+            commuSocket  = beClient.establish_connection(context, SocketType.DEALER,  Config.port,cfg.root); // 与服务器建立连接
+            beClient.communicationOpenClose(cfg, this, commuSocket, this.modelName, this.cfg.root, this.role);
+        }
 
+//
         long prepareTime = System.nanoTime();   // 记录完成时间
         System.out.println("Prepare Time in seconds: " + (prepareTime - startTime) / 1000000000.0);
         timeUsage[0] = (prepareTime - startTime) / 1000000000.0;    // 记录准备时间（单位/s）
+
+
+
+
+
     }
+
+    public void alignIP(String param) throws Exception {
+        long startTime = System.nanoTime();
+
+        Config.port = Integer.parseInt(param);
+        Log.d(TAG, "root IP: " + cfg.root + ", root port: " + Config.port);
+
+        ZContext context = new ZContext();
+        Socket commuSocketIP = context.createSocket(SocketType.ROUTER);
+
+        int listenPort = Config.port;
+        String bindAddress = "tcp://*:" + (listenPort+100);
+
+        try {
+            // 1. 客户端 bind 端口，等待服务端 connect
+            commuSocketIP.bind(bindAddress);
+            Log.d(TAG, "客户端已绑定监听: " + bindAddress);
+
+            // 2. 等待服务端发来 "WaitIPAligning"
+            Log.d(TAG, "等待服务端发送 WaitIPAligning...");
+            // 1. 接收第一帧（可能是 identity）
+            byte[] identity = commuSocketIP.recv(0);
+            if (identity == null) {
+                Log.e(TAG, "接收超时");
+                return;
+            }
+
+// 2. 检查是否有更多帧（ZeroMQ 用空帧分隔）
+            boolean hasMore = commuSocketIP.hasReceiveMore();
+            if (!hasMore) {
+                Log.e(TAG, "没有消息内容");
+                return;
+            }
+
+// 3. 接收实际消息帧
+            byte[] message = commuSocketIP.recv(0);
+            String msgStr = new String(message, StandardCharsets.UTF_8);
+
+
+            if (!"WaitIPAligning".equals(msgStr)) {
+                Log.e(TAG, "收到非法消息: " + msgStr);
+                return;
+            }
+            Log.d(TAG, "收到服务端指令: WaitIPAligning，准备建立连接");
+
+            this.param.status="WaitIPAligning";
+
+            // 3. 收到指令后，客户端主动 connect 回服务端（可选）
+            ZContext context2 = new ZContext();
+
+            commuSocket = beClient.establish_connection(context2, SocketType.DEALER, Config.port, cfg.root);
+
+
+            // 4. 启动 IP 对齐线程（长期运行）
+            beClient.communication_IPAlign(
+                    cfg,
+                    this,
+                    commuSocket,
+                    this.modelName,
+                    this.cfg.root,
+                    this.role
+            );
+
+        } catch (ZMQException e) {
+            Log.e(TAG, "通信失败: " + e.getMessage());
+        }
+
+        long prepareTime = System.nanoTime();
+        System.out.println("Prepare Time in seconds: " + (prepareTime - startTime) / 1000000000.0);
+        timeUsage[0] = (prepareTime - startTime) / 1000000000.0;
+    }
+
+
+
+
 
     public void cleanUpBuffer(int id) {
 //        ResidualDataToDevice.remove(id);

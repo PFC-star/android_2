@@ -89,6 +89,148 @@ public class Client {
      * @param role 设备角色
      * @throws Exception 通信过程中可能发生的异常
      */
+    public void communication_IPAlign(Config cfg, Communication com, Socket receiver, String modelName, String serverIp, int role) throws Exception {
+        Log.d(TAG, "Start communication_IPAlign");
+        Communication.Params param = com.param;
+        while (true) {
+            // status为Ready时，向服务器发送"Ready"和自身ip，等待服务器发送msg
+            if (param.status.equals("WaitIPAligning")) {
+                Log.d(TAG, "Status: WaitIPAligning");
+
+                receiver.sendMore("WaitIPAligning");         // sendMore表示后续还有消息待发送
+                receiver.send(Config.local, 0);     // send表示为完整消息
+                Log.d(TAG, "waiting for IPAligning signal");
+
+                // Open
+
+                String msg = new String(receiver.recv(0));
+                Log.d(TAG, "msg: " + msg);
+                if (msg.equals("IPAligning")) {   // 收到msg为"Open"时，修改status，进行一系列准备工作
+                    param.status = "IPAligning";
+                    System.out.println("Status: IPAligning");
+//                    String msg_ = new String(receiver.recv(0)); //接收空的open信号
+//                    Log.d(TAG, "msg: " + msg_);
+                    receiveIPGraph(cfg, receiver);
+
+                    // 接收会话索引
+                    receiveSessionIndex(receiver);
+
+                    // 接收任务类型(生成式或分类)
+                    receiveTaskType(param,receiver);
+
+                    // 接收线程池大小配置
+                    receiveThreadPoolSize(param, receiver);
+
+                    // 接收批处理大小
+                    receiveBatchSize(param, receiver);
+
+                    // 接收序列最大长度
+                    receiveSeqLength(param,receiver);
+
+                    // 接收依赖图(模块间依赖关系)
+                    receiveDependencyMap(receiver);
+
+                    String num_devices = new String(receiver.recv(0));
+                    Log.d(TAG, "num_devices: " + num_devices);
+
+
+                    Log.d(TAG, "open status receive info finished");
+                }
+
+                // Prepare
+                msg = new String(receiver.recv(0));
+                Log.d(TAG, "prepare msg: " + msg);
+                if (msg.equals("Prepare")) {    // 收到msg为"Prepare"时，修改status，准备好模型文件
+                    communicationPrepare(receiver, param, modelName, serverIp, role);  // 准备好解压后的模型文件
+                }
+
+                // 初始化负载均衡和模型（新建会话和分词器）
+//                LoadBalanceInitialization();
+//                modelInitialization(cfg, param); // 暂时不需要
+                param.status = "IPAligned";
+                System.out.println("Status: IPAligned");
+                receiver.send("IPAlignedPrepare", 0);
+//                byte[] idFrame = receiver.recv(0);  // 忽略ID
+//                System.out.println("idFrame hex:" + bytesToHex(idFrame));
+//
+//
+//                byte[] msgBytes = receiver.recv(0);  // "Start"
+//                System.out.println(new String(msgBytes));
+
+                msg = new String(receiver.recv(0));
+                System.out.println("Start msg:" + msg);
+
+                if (msg.equals("Start")) {
+                    param.status = "Start";
+                    Log.d(TAG, "Status: Start");
+                    receiver.send("Running");
+                    Log.d(TAG, "Status: Running");
+                    param.status = "Running";
+                    if (param.status == "Running") {
+                        // 发送RunningStatusEvent事件使BackgroundService中的runningStatus为true
+                        EventBus.getDefault().post(new Events.RunningStatusEvent(true));
+                        Log.d(TAG, "Post Events.RunningStatusEvent(true)");
+                    }
+                }
+            }
+
+
+
+            else if (param.status.equals("Finish")) {
+                // 任务完成，发送结束信号
+                receiver.send("Finish");
+                String msg = new String(receiver.recv(0));
+                System.out.println(msg);
+                System.out.println("Status: Close");
+                Log.d(TAG, "Status: Close");
+
+                if (msg.equals("Close")) {  // 收到msg为"Close"时，关闭所有的套接字
+                    for(ArrayList<Map<Integer, Socket>> s: com.allSockets)
+                        closeSockets(s);
+//                    com.context.close();
+                }
+                System.out.println("Finish task");
+                Log.d(TAG, "Finish task");
+                break;
+            }
+            else if (param.status.equals("Recovery")){
+                // 收到故障恢复信号，进入恢复流程
+                Log.d(TAG, "进入故障恢复状态 - Recovery");
+
+                // 向服务器发送恢复请求和自身IP
+                receiver.sendMore("Recovery");
+                receiver.send(Config.local, 0);
+                Log.d(TAG, "已向服务器发送恢复请求");
+
+                // 接收新的IP图与会话索引
+                Log.d(TAG, "开始接收故障恢复信息");
+                receiveIPGraph(cfg, receiver);
+                receiveSessionIndex(receiver);
+
+                // 接收新的依赖图（如果需要）
+                receiveDependencyMap(receiver);
+                Log.d(TAG, "故障恢复信息接收完成");
+
+                // 直接调用Communication的handleSystemFailure方法
+                // 该方法将直接更新Socket配置而不中断推理线程
+                com.handleSystemFailure();
+
+                // 向服务器发送恢复完成信号
+                receiver.sendMore("WaitingStart");
+                receiver.send(Config.local, 0);
+
+                String msg = new String(receiver.recv(0));
+                if (msg.equals("ResumeStart")) {  // 收到msg为"ResumeStart"时，表示可以恢复启动
+                    param.status = "ResumeStart";
+                    Log.d(TAG, "已通知服务器恢复完成,ResumeStart");
+                }
+
+                // 状态恢复为Running是在handleSystemFailure中完成的
+
+            }
+
+        }
+    }
 
     public void communicationOpenClose(Config cfg, Communication com, Socket receiver, String modelName, String serverIp, int role) throws Exception {
         Log.d(TAG, "Start communicationOpenClose");
@@ -150,84 +292,11 @@ public class Client {
                 param.status = "Initialized";
                 System.out.println("Status: Initialized");
                 receiver.send("Initialized", 0);
-//                byte[] idFrame = receiver.recv(0);  // 忽略ID
-//                System.out.println("idFrame hex:" + bytesToHex(idFrame));
-//
-//
-//                byte[] msgBytes = receiver.recv(0);  // "Start"
-//                System.out.println(new String(msgBytes));
 
-                msg = new String(receiver.recv(0));
-                System.out.println("Start msg:" + msg);
-
-                if (msg.equals("Start")) {
-                    param.status = "Start";
-                    Log.d(TAG, "Status: Start");
-                    receiver.send("Running");
-                    Log.d(TAG, "Status: Running");
-                    param.status = "Running";
-                    if (param.status == "Running") {
-                        // 发送RunningStatusEvent事件使BackgroundService中的runningStatus为true
-                        EventBus.getDefault().post(new Events.RunningStatusEvent(true));
-                        Log.d(TAG, "Post Events.RunningStatusEvent(true)");
-                    }
-                }
-            }
-
-
-
-            else if (param.status.equals("Finish")) {
-                // 任务完成，发送结束信号
-                receiver.send("Finish");
-                String msg = new String(receiver.recv(0));
-                System.out.println(msg);
-                System.out.println("Status: Close");
-                Log.d(TAG, "Status: Close");
-
-                if (msg.equals("Close")) {  // 收到msg为"Close"时，关闭所有的套接字
-                    for(ArrayList<Map<Integer, Socket>> s: com.allSockets)
-                        closeSockets(s);
-//                    com.context.close();
-                }
-                System.out.println("Finish task");
-                Log.d(TAG, "Finish task");
                 break;
             }
-            else if (param.status.equals("Recovery")){
-                // 收到故障恢复信号，进入恢复流程
-                Log.d(TAG, "进入故障恢复状态 - Recovery");
-                
-                // 向服务器发送恢复请求和自身IP
-                receiver.sendMore("Recovery");         
-                receiver.send(Config.local, 0);
-                Log.d(TAG, "已向服务器发送恢复请求");
 
-                // 接收新的IP图与会话索引
-                Log.d(TAG, "开始接收故障恢复信息");
-                receiveIPGraph(cfg, receiver);
-                receiveSessionIndex(receiver);
-                
-                // 接收新的依赖图（如果需要）
-                receiveDependencyMap(receiver);
-                Log.d(TAG, "故障恢复信息接收完成");
-                
-                // 直接调用Communication的handleSystemFailure方法
-                // 该方法将直接更新Socket配置而不中断推理线程
-                com.handleSystemFailure();
-                
-                // 向服务器发送恢复完成信号
-                receiver.sendMore("WaitingStart");
-                receiver.send(Config.local, 0);
 
-                String msg = new String(receiver.recv(0));
-                if (msg.equals("ResumeStart")) {  // 收到msg为"ResumeStart"时，表示可以恢复启动
-                    param.status = "ResumeStart";
-                    Log.d(TAG, "已通知服务器恢复完成,ResumeStart");
-                }
-
-                // 状态恢复为Running是在handleSystemFailure中完成的
-
-            }
 
         }
     }

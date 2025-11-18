@@ -58,6 +58,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
     public static final String TAG = "StarDust_backend";
     private String role = "worker";                 // 设备的角色，默认为"worker"
     private  String serverStatus = "active";           // 是否需要monitor服务
+    private  String  monitor_port = "1000";           // 是否需要monitor服务
     private final boolean running_classification = false;   // 是否为分类任务
     private boolean shouldStartInference = false;   // 是否开始推理
     public static boolean runningStatus = false;          // 是否为运行状态
@@ -316,11 +317,14 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             // 1. send IP to server to request model
             // 与服务器建立连接，发送自身ip（对头结点还需加上模型名称），根据从服务器接受信息决定need_monitor为true/false
             if (role.equals("header")) {
-                serverStatus = com.sendIPToServer(role, finalModelName); // 头节点需要提供模型名称
+                monitor_port = com.sendIPToServer(role, finalModelName); // 头节点需要提供模型名称
             } else {
-                serverStatus = com.sendIPToServer(role, ""); // 工作节点不需要提供模型名称
+                monitor_port = com.sendIPToServer(role, ""); // 工作节点不需要提供模型名称
             }
-            Log.d(TAG, "serverStatus = " + serverStatus);
+            Log.d(TAG, "monitor_port = " + monitor_port);
+//          启动控初始化通信
+            com.runPrepareThread(monitor_port);
+
 
             // 2. Initiate device monitor for server-side optimization
             // 若need_monitor为true，则发送action为"START_MONITOR"的广播，
@@ -332,43 +336,32 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 //                sendBroadcast(broadcastIntent);
 //                Log.d(TAG, "broadcast sent by backgroundService");
 //            }
-            if (serverStatus.equals("working")){
-                Log.d(TAG, "serverStatus :working ");
-//              初始化阶段
-//                1. 传输控制信号 34567
-//                    1.1 Ready->Open->Prepare->Initialized->Start->Running
+//            if (serverStatus.equals("working")){
+//                Log.d(TAG, "serverStatus :working ");
+////              初始化阶段
+////                1. 传输控制信号 34567
+////                    1.1 Ready->Open->Prepare->Initialized->Start->Running
+////
+//                // 3.1 start downloading required model and tokenizer files from server
+//                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
+//                com.runPrepareThread(serverStatus);
 //
-                // 3.1 start downloading required model and tokenizer files from server
-                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
-                com.runPrepareThread(serverStatus);
-
-            }
-
-            if (serverStatus.equals("active")){
-                Log.d(TAG, "serverStatus :active ");
-                // 3.1 start downloading required model and tokenizer files from server
-                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
-                com.runPrepareThread(serverStatus);
-//              运行阶段
-//                1. 传输控制信号 34567
-//                    1.1 Ready->Open->Prepare->Initialized 到这里但是不启动推理
-//                    ->Start->Running
-//                  什么时候启动推理呢？server检测到设备故障
-//                    server 进入故障恢复函数 （把这个搞定吧）
-//                    手机1 进入故障恢复函数
-//                找到通信IP图（config["graph"],
-//                            config["session_index"],）
-//                            receiveIPGraph(cfg, receiver); -> Config.buildCommunicationGraph()
-//                            receiveSessionIndex(receiver);
-//                      以及注册IP图的地方，Communication.updateSockets
+//            }
 //
-//                  重新通信IP图，启动手机3
-//                  重新注册IP图，启动手机1
-//                  恢复推理：手机1 根据IP图重新通信到手机3
-
-
-
-            }
+//            if (serverStatus.equals("active")){
+//                Log.d(TAG, "serverStatus :active ");
+//                // 3.1 start downloading required model and tokenizer files from server
+//                // 执行Client.communicationOpenClose中param.status.equals("Ready")对应代码，包括准备模型文件和分词器等从初始化工作
+//                com.runPrepareThread(serverStatus);
+////              运行阶段
+////                1. 传输控制信号 34567
+////                    1.1 Ready->Open->Prepare->Initialized 到这里但是不启动推理
+////                    ->Start->Running
+//
+//
+//
+//
+//            }
 
 
 
