@@ -1131,7 +1131,7 @@ public class Communication {
                         // 更新状态检查逻辑，使用类成员变量prevStatus
                         // 检查系统状态是否从恢复状态转变为运行状态
                         Log.e(TAG,"系统当前状态:"+param.status+ "系统前状态:"+prevStatus);
-                        if(("ResumeStart".equals(param.status) && "Running".equals(prevStatus))  || ( m==1) )  {
+                        if(("ResumeStart".equals(param.status) && "Running".equals(prevStatus))  )  {
                             Log.d(TAG, "系统已从恢复状态转为运行状态，重新获取Socket");
                             long recoveryTime = System.currentTimeMillis();
                             String deviceId = "" + cfg.deviceId;
@@ -1682,6 +1682,8 @@ public class Communication {
     public void updateSockets(int corePoolSize) throws InterruptedException {
         Log.d(TAG, "开始执行updateSockets，核心池大小: " + corePoolSize);
         Log.d(TAG, "发送设备集合: " + sendDeviceIndex + ", 接收设备集合: " + receiveDeviceIndex);
+
+        int basePortNum = 34535;
         if ("Recovery".equals(param.status) || "Recovering".equals(param.status) || "Failure".equals(param.status)|| "WaitingStart".equals(param.status) ) {
             Config.port=10000;
             Log.e(TAG,"updateSockets Port:"+Config.port);
@@ -1778,7 +1780,9 @@ public class Communication {
             // 如果当前节点是头节点，需要额外创建与尾节点通信的Socket
             if (cfg.isHeader()){
                 try {
-                    int portNum = Config.port + j*i + 1;
+
+//                    int portNum = Config.port + j*i + 1;
+                    int portNum = basePortNum + j*i + 1;
                     String targetIP = cfg.prevNodes.get(0);
                     Log.d(TAG, "头节点创建额外Socket从尾节点, IP: " + targetIP + 
                           ", 端口: " + portNum);

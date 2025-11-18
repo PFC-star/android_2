@@ -391,9 +391,22 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                     updateIsDirEmpty(isDirEmpty);
                 }
             }
-
+            System.out.println("出错");
             // 对于头节点，等待用户确认开始推理
             // 当用户点击开始推理按钮时，会发送enterChatEvent事件，将shouldStartInference设为true
+
+            Log.e(TAG, "╔════════════════════════════════════════════");
+            Log.e(TAG, "║         分布式推理服务正式启动");
+            Log.e(TAG, "╟────────────────────────────────────────────");
+            Log.e(TAG, "║ 角色(role)          : " + role);
+            Log.e(TAG, "║ cfg.isHeader()      : " + cfg.isHeader());           // 重点1
+            Log.e(TAG, "║ serverIP            : " + serverIP);
+            Log.e(TAG, "║ modelName           : " + finalModelName);
+            Log.e(TAG, "║ 当前线程            : " + Thread.currentThread().getName());
+            Log.e(TAG, "╟────────────────────────────────────────────");
+            Log.e(TAG, "║ shouldStartInference  : " + shouldStartInference);  // 重点2
+            Log.e(TAG, "╚════════════════════════════════════════════");
+
             if (cfg.isHeader()) {
                 while (!shouldStartInference) {
                     try {
@@ -408,6 +421,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
             // 对头结点的推理过程
             if (shouldStartInference && cfg.isHeader()){
                 // 设置分类标签
+                System.out.println("头节点信息初始化");
                 com.param.classes = new String[]{"Negative", "Positive"};
                 // 4.2 Dataset would be used if we need conduct evaluation experiment
                 Dataset dataset = null;
@@ -515,13 +529,16 @@ public class BackgroundService extends Service {    // 继承自Service，表明
 
             // 非头节点推理流程
             // 工作节点不需要用户输入，直接执行推理任务
+
             else if (!shouldStartInference && !cfg.isHeader()){
+
+                System.out.println("工作节点信息初始化");
                 com.param.classes = new String[]{"Negative", "Positive"};
                 Dataset dataset = null;
                 // 等待批处理大小设置完成
                 while (com.param.numSample <= 0)
                     Thread.sleep(1000);
-                
+                System.out.println("批处理大小设置完成");
                 // 工作节点不需要实际的输入数据，但需要提供一个空列表
                 ArrayList<String> test_input = new ArrayList<>();
                 int corePoolSize = 2;
@@ -539,6 +556,7 @@ public class BackgroundService extends Service {    // 继承自Service，表明
                 results = com.timeUsage;
                 return null;
             }
+            System.out.println("出错");
             return null;
         });
 

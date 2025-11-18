@@ -145,7 +145,7 @@ public class Client {
                 }
 
                 // 初始化负载均衡和模型（新建会话和分词器）
-//                LoadBalanceInitialization();
+                LoadBalanceInitialization();
 //                modelInitialization(cfg, param); // 暂时不需要
                 param.status = "IPAligned";
                 System.out.println("Status: IPAligned");

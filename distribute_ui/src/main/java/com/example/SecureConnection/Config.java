@@ -118,11 +118,13 @@ public class Config {
                 setNextNodes(new ArrayList<>(Arrays.asList(ipGraph[1])));
             }else if (local.equals(ipGraph[ipGraph.length-1])) {
                 setTailer(true);
+                setHeader(false);
                 setPrevNodes(new ArrayList<>(Arrays.asList(ipGraph[ipGraph.length-2])));
                 setNextNodes(new ArrayList<>(Arrays.asList(ipGraph[0])));
             }else {
                 for (int i = 1; i < ipGraph.length-1; i++){
                     if (local.equals(ipGraph[i])){
+                        setHeader(false);
                         setPrevNodes(new ArrayList<>(Arrays.asList(ipGraph[i-1])));
                         setNextNodes(new ArrayList<>(Arrays.asList(ipGraph[i+1])));
                     }
